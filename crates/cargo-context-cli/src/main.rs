@@ -7,7 +7,7 @@
 use std::io::{IsTerminal, Read};
 
 use anyhow::{bail, Result};
-use cargo_context_core::{Format, PackBuilder, Preset, Tokenizer};
+use cargo_context_core::{Budget, BudgetStrategy, Format, PackBuilder, Preset, Tokenizer};
 use clap::{Parser, ValueEnum};
 
 /// High-fidelity context engineering for Rust AI workflows.
@@ -33,6 +33,10 @@ struct Args {
     /// Tokens reserved for the model's response.
     #[arg(long, default_value_t = 2000)]
     reserve_tokens: usize,
+
+    /// How to reconcile candidate sections with the token limit.
+    #[arg(long, value_enum, default_value_t = BudgetStrategyArg::Priority)]
+    budget_strategy: BudgetStrategyArg,
 
     /// Tokenizer to use for counting.
     #[arg(long, value_enum, default_value_t = TokenizerArg::Llama3)]
@@ -71,6 +75,23 @@ impl From<PresetArg> for Preset {
             PresetArg::Fix => Preset::Fix,
             PresetArg::Feature => Preset::Feature,
             PresetArg::Custom => Preset::Custom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BudgetStrategyArg {
+    Priority,
+    Proportional,
+    Truncate,
+}
+
+impl From<BudgetStrategyArg> for BudgetStrategy {
+    fn from(s: BudgetStrategyArg) -> Self {
+        match s {
+            BudgetStrategyArg::Priority => BudgetStrategy::Priority,
+            BudgetStrategyArg::Proportional => BudgetStrategy::Proportional,
+            BudgetStrategyArg::Truncate => BudgetStrategy::Truncate,
         }
     }
 }
@@ -143,10 +164,15 @@ fn main() -> Result<()> {
         true
     };
 
+    let budget = Budget {
+        max_tokens: args.max_tokens,
+        reserve_tokens: args.reserve_tokens,
+        strategy: args.budget_strategy.into(),
+    };
+
     let mut builder = PackBuilder::new()
         .preset(preset)
-        .max_tokens(args.max_tokens)
-        .reserve_tokens(args.reserve_tokens)
+        .budget(budget)
         .tokenizer(args.tokenizer.into())
         .scrub(scrub)
         .project_root(std::env::current_dir()?);

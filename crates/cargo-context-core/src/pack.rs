@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::Budget;
+use crate::budget::{self, Budget, Priority, P_DIFF, P_ERROR, P_EXEMPT, P_MAP};
 use crate::collect::{self, Diagnostics, Diff, WorkspaceMap};
 use crate::error::Result;
 use crate::scrub::Scrubber;
@@ -57,9 +57,14 @@ impl Pack {
     pub fn render_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# PROJECT CONTEXT PACK: {}\n", self.project));
+        let dropped = if self.dropped.is_empty() {
+            String::new()
+        } else {
+            format!(" | dropped: {}", self.dropped.join(", "))
+        };
         out.push_str(&format!(
-            "<!-- schema: {} | tokens: {}/{} | tokenizer: {} -->\n\n",
-            self.schema, self.tokens_used, self.tokens_budget, self.tokenizer
+            "<!-- schema: {} | tokens: {}/{} | tokenizer: {}{} -->\n\n",
+            self.schema, self.tokens_used, self.tokens_budget, self.tokenizer, dropped
         ));
         for s in &self.sections {
             out.push_str(&format!("## {}\n\n{}\n\n", s.name, s.content));
@@ -171,62 +176,74 @@ impl PackBuilder {
 
     /// Assemble the pack.
     ///
-    /// The preset decides which collectors to call. Collectors that fail for
-    /// expected reasons (no git repo, no Cargo.toml) produce empty sections
-    /// rather than aborting the whole build — a half-useful pack beats a hard
-    /// failure at the CLI.
+    /// Flow:
+    /// 1. Collect candidate sections per preset (collectors that fail for
+    ///    expected reasons return `None` — a missing git repo or Cargo.toml
+    ///    never aborts the build).
+    /// 2. Run the scrubber over each section's content. Scrubbing may shrink
+    ///    or grow content, so we re-count tokens *after* it.
+    /// 3. Reconcile with the token budget using the configured strategy.
+    ///    Dropped section names are surfaced on `Pack.dropped`.
     pub fn build(self) -> Result<Pack> {
-        let mut sections: Vec<Section> = Vec::new();
         let root = self
             .project_root
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+        let mut candidates: Vec<(Priority, Section)> = Vec::new();
+
         if let Some(prompt) = &self.stdin_prompt {
-            sections.push(mk_section("📝 User Prompt", prompt, self.tokenizer));
+            candidates.push((
+                P_EXEMPT,
+                mk_section("📝 User Prompt", prompt, self.tokenizer),
+            ));
         }
 
         let wants = SectionWants::for_preset(self.preset);
 
-        if wants.map {
-            if let Some(content) = try_collect_map(&root) {
-                sections.push(mk_section("🗺️ Project Map", &content, self.tokenizer));
-            }
-        }
         if wants.errors {
             if let Some(content) = try_collect_errors(&root) {
-                sections.push(mk_section(
-                    "🚨 Current State (Errors)",
-                    &content,
-                    self.tokenizer,
+                candidates.push((
+                    P_ERROR,
+                    mk_section("🚨 Current State (Errors)", &content, self.tokenizer),
                 ));
             }
         }
         if wants.diff {
             if let Some(content) = try_collect_diff(&root) {
-                sections.push(mk_section("⚡ Intent (Git Diff)", &content, self.tokenizer));
+                candidates.push((
+                    P_DIFF,
+                    mk_section("⚡ Intent (Git Diff)", &content, self.tokenizer),
+                ));
+            }
+        }
+        if wants.map {
+            if let Some(content) = try_collect_map(&root) {
+                candidates.push((
+                    P_MAP,
+                    mk_section("🗺️ Project Map", &content, self.tokenizer),
+                ));
             }
         }
 
         if self.scrub {
             let scrubber = Scrubber::with_builtins()?;
-            for s in sections.iter_mut() {
+            for (_, s) in candidates.iter_mut() {
                 s.content = scrubber.scrub(&s.content);
                 s.token_estimate = self.tokenizer.count(&s.content);
             }
         }
 
-        let tokens_used: usize = sections.iter().map(|s| s.token_estimate).sum();
-        let tokens_budget = self.budget.effective();
+        let alloc = budget::allocate(candidates, &self.budget, self.tokenizer);
 
         Ok(Pack {
             schema: "cargo-context/v1".into(),
             project: project_name(self.project_root.as_deref()),
-            sections,
-            tokens_used,
-            tokens_budget,
+            sections: alloc.kept,
+            tokens_used: alloc.tokens_used,
+            tokens_budget: alloc.tokens_budget,
             tokenizer: self.tokenizer.label().into(),
-            dropped: Vec::new(),
+            dropped: alloc.dropped,
         })
     }
 }
