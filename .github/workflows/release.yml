@@ -81,7 +81,7 @@ jobs:
             echo "asset=${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ steps.package.outputs.asset }}
