@@ -1,0 +1,57 @@
+# cargo-context scrub rules — example.
+# See README.md §10 for the full schema reference.
+
+version: 1
+
+# Built-in rules are always active unless explicitly disabled.
+builtins: extend
+
+# Disable a built-in rule by id (see README §10.3 for the full list).
+# disable_builtins:
+#   - jwt
+
+# Project-specific patterns added on top of built-ins.
+patterns:
+  - id: acme_internal_api_key
+    regex: 'ACME_[A-Z0-9]{32}'
+    category: api_key
+    severity: high
+
+  - id: stripe_live_key
+    regex: 'sk_live_[A-Za-z0-9]{24,}'
+    category: payment
+    severity: critical
+
+entropy:
+  enabled: true
+  min_length: 20
+  threshold: 4.5
+  context_keys:
+    - key
+    - secret
+    - token
+    - password
+    - credential
+    - api[_-]?key
+
+paths:
+  redact_whole:
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/id_rsa*"
+    - "**/credentials*"
+    - "**/secrets/**"
+  exclude:
+    - "**/test_fixtures/public_keys/**"
+
+# Strings that must never be redacted, even if a rule would match.
+allowlist:
+  - regex: '^AKIAEXAMPLE[0-9]+$'
+  - regex: '^ghp_000000000000000000000000000000000000$'
+
+report:
+  stderr_summary: true
+  fail_on_match: false
+  log_file: null

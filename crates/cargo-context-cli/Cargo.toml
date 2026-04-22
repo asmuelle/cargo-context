@@ -1,0 +1,18 @@
+[package]
+name = "cargo-context-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI front-end for cargo-context — the `cargo context` subcommand."
+
+[[bin]]
+name = "cargo-context"
+path = "src/main.rs"
+
+[dependencies]
+cargo-context-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

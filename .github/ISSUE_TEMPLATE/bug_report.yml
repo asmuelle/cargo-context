@@ -1,0 +1,81 @@
+name: Bug report
+description: Something is broken or producing incorrect output.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please keep the report focused on
+        **one** issue. For security-sensitive reports (e.g. secret leakage through the
+        scrubber), see the SECURITY.md policy instead of filing a public issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: cargo-context version
+      description: Output of `cargo context --version` (or the tag/commit you built from).
+      placeholder: "0.1.0 or main@abcd123"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which part of cargo-context is affected?
+      options:
+        - CLI (cargo-context binary)
+        - MCP server (cargo-context-mcp)
+        - Library (cargo-context-core)
+        - Scrubber
+        - Tokenizer / token budgeting
+        - Macro expansion
+        - Collection (git diff, errors, metadata, tests)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS + arch + Rust toolchain.
+      placeholder: "macOS 14.5 arm64, rustc 1.78.0 stable"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce. Include the exact command invocation.
+      placeholder: |
+        1. `cd my-project`
+        2. `cargo context --fix --max-tokens 4000`
+        3. Observe ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full output (stdout + stderr). **Scrub any real secrets before pasting.**
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else — workspace layout, linked upstream issues, screenshots.

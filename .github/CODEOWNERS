@@ -1,0 +1,20 @@
+# CODEOWNERS — GitHub automatically requests review from listed owners.
+# Order matters: later matches override earlier ones.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo.
+*                                   @andreasmueller
+
+# Core engine — changes here affect every downstream consumer.
+/crates/cargo-context-core/         @andreasmueller
+
+# Scrubber rules guard secret-leakage; require owner review even on formatting-only changes.
+/crates/cargo-context-core/src/scrub.rs   @andreasmueller
+/crates/cargo-context-scrub/              @andreasmueller
+/.cargo-context/scrub.yaml                @andreasmueller
+
+# CI, release, and dependency automation.
+/.github/                           @andreasmueller
+/Cargo.toml                         @andreasmueller
+/Cargo.lock                         @andreasmueller
+/rust-toolchain.toml                @andreasmueller

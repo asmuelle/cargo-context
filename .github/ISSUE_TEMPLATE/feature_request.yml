@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a new capability, flag, tokenizer, scrubber rule, or integration.
+title: "[feat]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        cargo-context is deliberately scoped — see the **Non-Goals** section of the
+        README before filing. Requests that push into "becoming a chat client" or
+        "becoming a code indexer" will be closed as out-of-scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? What does the current output miss?
+      placeholder: |
+        When I run cargo-context inside a workspace with 12 crates, the project map
+        section dumps all of them and blows the token budget before any source code
+        is included.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Concrete sketch — flags, module names, output shape, MCP tool signature, whatever fits.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - CLI flag / preset
+        - MCP tool / resource / prompt
+        - Library API (cargo-context-core)
+        - New tokenizer
+        - New scrubber rule or entropy tuning
+        - Macro expansion behavior
+        - Collection (diff / errors / metadata / tests)
+        - Output format
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you rule out, and why?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope sanity check
+      options:
+        - label: This does not turn cargo-context into a chat client, code indexer, or prompt library.
+          required: true
+        - label: This is model-agnostic (or I'm proposing to loosen that constraint with justification).
+          required: true

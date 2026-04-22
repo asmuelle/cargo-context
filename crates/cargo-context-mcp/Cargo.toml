@@ -1,0 +1,21 @@
+[package]
+name = "cargo-context-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Model Context Protocol server exposing cargo-context as tools/resources/prompts."
+
+[[bin]]
+name = "cargo-context-mcp"
+path = "src/main.rs"
+
+[dependencies]
+cargo-context-core = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

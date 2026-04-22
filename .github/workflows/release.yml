@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (for aarch64-linux)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }} --bin cargo-context --bin cargo-context-mcp
+          else
+            cargo build --release --locked --target ${{ matrix.target }} --bin cargo-context --bin cargo-context-mcp
+          fi
+
+      - name: Package archive
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          STAGE="cargo-context-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp README.md LICENSE "$STAGE/"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/cargo-context.exe" "$STAGE/"
+            cp "target/${{ matrix.target }}/release/cargo-context-mcp.exe" "$STAGE/"
+            7z a "${STAGE}.zip" "$STAGE"
+            echo "asset=${STAGE}.zip" >> "$GITHUB_OUTPUT"
+          else
+            cp "target/${{ matrix.target }}/release/cargo-context" "$STAGE/"
+            cp "target/${{ matrix.target }}/release/cargo-context-mcp" "$STAGE/"
+            tar czf "${STAGE}.tar.gz" "$STAGE"
+            echo "asset=${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ steps.package.outputs.asset }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

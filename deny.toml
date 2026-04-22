@@ -1,0 +1,65 @@
+# cargo-deny configuration.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally:
+#   cargo install cargo-deny --locked
+#   cargo deny check
+
+[graph]
+# Evaluate the full workspace graph, all targets.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------- Advisories (RustSec DB) ----------
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+# ---------- Licenses ----------
+[licenses]
+version = 2
+# SPDX identifiers allowed across the workspace + deps.
+# Keep this list tight: additions require justification in the PR.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+# ---------- Bans ----------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = [
+    # Unmaintained TLS stack; openssl or rustls preferred.
+    { name = "openssl-sys", version = "*", wrappers = [] },
+]
+skip = []
+skip-tree = []
+
+# ---------- Sources ----------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

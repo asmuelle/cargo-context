@@ -1,0 +1,12 @@
+[package]
+name = "cargo-context-scrub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone re-export of cargo-context's secret scrubber for non-Cargo codebases."
+
+[dependencies]
+cargo-context-core = { workspace = true }

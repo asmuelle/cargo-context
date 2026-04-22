@@ -1,0 +1,12 @@
+msrv = "1.75"
+
+# Keep signatures simple. Flag helpers that grow too many knobs.
+too-many-arguments-threshold = 7
+
+# Encourage splitting dense logic; doesn't change semantics.
+cognitive-complexity-threshold = 25
+
+# `.unwrap()` is allowed in tests only (documented in rules/rust/coding-style.md).
+# Production code should propagate errors with `?` — this keeps review easy.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
