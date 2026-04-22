@@ -2,8 +2,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::{self, Budget, Priority, P_DIFF, P_ERROR, P_EXEMPT, P_MAP};
-use crate::collect::{self, Diagnostics, Diff, WorkspaceMap};
+use crate::budget::{self, Budget, Priority, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP};
+use crate::collect::{self, Diagnostics, Diff, EntryPoints, WorkspaceMap};
 use crate::error::Result;
 use crate::scrub::Scrubber;
 use crate::tokenize::Tokenizer;
@@ -225,6 +225,14 @@ impl PackBuilder {
                 ));
             }
         }
+        if wants.entry {
+            if let Some(content) = try_collect_entry(&root) {
+                candidates.push((
+                    P_ENTRY,
+                    mk_section("🧭 Entry Points", &content, self.tokenizer),
+                ));
+            }
+        }
 
         if self.scrub {
             let scrubber = Scrubber::with_builtins()?;
@@ -253,6 +261,7 @@ struct SectionWants {
     map: bool,
     errors: bool,
     diff: bool,
+    entry: bool,
 }
 
 impl SectionWants {
@@ -262,16 +271,19 @@ impl SectionWants {
                 map: false,
                 errors: true,
                 diff: true,
+                entry: false,
             },
             Preset::Feature => Self {
                 map: true,
                 errors: false,
                 diff: true,
+                entry: true,
             },
             Preset::Custom => Self {
                 map: true,
                 errors: false,
                 diff: true,
+                entry: true,
             },
         }
     }
@@ -297,6 +309,42 @@ fn try_collect_errors(root: &Path) -> Option<String> {
     } else {
         Some(render_diagnostics(&d))
     }
+}
+
+fn try_collect_entry(root: &Path) -> Option<String> {
+    let ep = collect::entry_points(root).ok()?;
+    if ep.is_empty() {
+        None
+    } else {
+        Some(render_entry(&ep))
+    }
+}
+
+fn render_entry(ep: &EntryPoints) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} entry file(s).\n\n", ep.files.len()));
+    for f in &ep.files {
+        let kind = match f.kind {
+            collect::EntryKind::Main => "main",
+            collect::EntryKind::Lib => "lib",
+        };
+        let tag = if f.parse_failed { " (unparsed)" } else { "" };
+        out.push_str(&format!(
+            "### `{}` — {} / {} ({} lines){}\n",
+            f.path.display(),
+            f.crate_name,
+            kind,
+            f.raw_line_count,
+            tag,
+        ));
+        out.push_str("```rust\n");
+        out.push_str(&f.rendered);
+        if !f.rendered.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+    }
+    out
 }
 
 fn render_map(m: WorkspaceMap) -> String {

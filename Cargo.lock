@@ -105,11 +105,15 @@ name = "cargo-context-core"
 version = "0.1.0"
 dependencies = [
  "cargo_metadata",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "syn",
  "tempfile",
  "thiserror 2.0.18",
 ]
