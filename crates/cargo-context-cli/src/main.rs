@@ -171,6 +171,6 @@ fn main() -> Result<()> {
 
     let pack = builder.build()?;
     let rendered = pack.render(args.format.into())?;
-    print!("{}", rendered);
+    print!("{rendered}");
     Ok(())
 }

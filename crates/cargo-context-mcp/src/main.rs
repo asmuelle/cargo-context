@@ -44,7 +44,7 @@ fn main() -> Result<()> {
             }),
         };
 
-        writeln!(stdout, "{}", response)?;
+        writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
 

@@ -81,7 +81,7 @@ impl Scrubber {
                 id: (*id).into(),
                 category: (*cat).into(),
                 regex: Regex::new(re)?,
-                replacement: format!("<REDACTED:{}:{{hash4}}>", cat),
+                replacement: format!("<REDACTED:{cat}:{{hash4}}>"),
             });
         }
         Ok(Self { patterns })

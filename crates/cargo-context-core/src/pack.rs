@@ -1,6 +1,9 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::budget::Budget;
+use crate::collect::{self, Diagnostics, Diff, WorkspaceMap};
 use crate::error::Result;
 use crate::scrub::Scrubber;
 use crate::tokenize::Tokenizer;
@@ -168,26 +171,42 @@ impl PackBuilder {
 
     /// Assemble the pack.
     ///
-    /// Skeleton: returns a pack with just the user prompt (if any) and a
-    /// project-map placeholder. Collection of errors / diff / files / tests
-    /// is wired up in the `collect` module and will be filled in as those
-    /// implementations land.
+    /// The preset decides which collectors to call. Collectors that fail for
+    /// expected reasons (no git repo, no Cargo.toml) produce empty sections
+    /// rather than aborting the whole build — a half-useful pack beats a hard
+    /// failure at the CLI.
     pub fn build(self) -> Result<Pack> {
         let mut sections: Vec<Section> = Vec::new();
+        let root = self
+            .project_root
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
 
         if let Some(prompt) = &self.stdin_prompt {
             sections.push(mk_section("📝 User Prompt", prompt, self.tokenizer));
         }
 
-        sections.push(mk_section(
-            "🗺️ Project Map",
-            &format!(
-                "- Project: {}\n- Preset: {:?}\n- (collection not yet implemented in skeleton)",
-                project_name(self.project_root.as_deref()),
-                self.preset,
-            ),
-            self.tokenizer,
-        ));
+        let wants = SectionWants::for_preset(self.preset);
+
+        if wants.map {
+            if let Some(content) = try_collect_map(&root) {
+                sections.push(mk_section("🗺️ Project Map", &content, self.tokenizer));
+            }
+        }
+        if wants.errors {
+            if let Some(content) = try_collect_errors(&root) {
+                sections.push(mk_section(
+                    "🚨 Current State (Errors)",
+                    &content,
+                    self.tokenizer,
+                ));
+            }
+        }
+        if wants.diff {
+            if let Some(content) = try_collect_diff(&root) {
+                sections.push(mk_section("⚡ Intent (Git Diff)", &content, self.tokenizer));
+            }
+        }
 
         if self.scrub {
             let scrubber = Scrubber::with_builtins()?;
@@ -212,6 +231,137 @@ impl PackBuilder {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SectionWants {
+    map: bool,
+    errors: bool,
+    diff: bool,
+}
+
+impl SectionWants {
+    fn for_preset(p: Preset) -> Self {
+        match p {
+            Preset::Fix => Self {
+                map: false,
+                errors: true,
+                diff: true,
+            },
+            Preset::Feature => Self {
+                map: true,
+                errors: false,
+                diff: true,
+            },
+            Preset::Custom => Self {
+                map: true,
+                errors: false,
+                diff: true,
+            },
+        }
+    }
+}
+
+fn try_collect_map(root: &Path) -> Option<String> {
+    collect::cargo_metadata(root).ok().map(render_map)
+}
+
+fn try_collect_diff(root: &Path) -> Option<String> {
+    let d = collect::git_diff(root, None).ok()?;
+    if d.is_empty() {
+        None
+    } else {
+        Some(render_diff(&d))
+    }
+}
+
+fn try_collect_errors(root: &Path) -> Option<String> {
+    let d = collect::last_error(root).ok()?;
+    if d.is_empty() {
+        None
+    } else {
+        Some(render_diagnostics(&d))
+    }
+}
+
+fn render_map(m: WorkspaceMap) -> String {
+    let mut out = String::new();
+    if let Some(root) = &m.root_package {
+        out.push_str(&format!("- Root package: `{root}`\n"));
+    }
+    let members = m.member_names();
+    if !members.is_empty() {
+        out.push_str(&format!("- Workspace members ({}): ", members.len()));
+        out.push_str(&members.join(", "));
+        out.push('\n');
+    }
+    let deps = m.external_dep_names();
+    if !deps.is_empty() {
+        let preview: Vec<&str> = deps.iter().take(12).copied().collect();
+        out.push_str(&format!(
+            "- Key dependencies: {}{}\n",
+            preview.join(", "),
+            if deps.len() > preview.len() {
+                format!(" (+{} more)", deps.len() - preview.len())
+            } else {
+                String::new()
+            }
+        ));
+    }
+    out
+}
+
+fn render_diff(d: &Diff) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} file(s) changed.\n\n", d.files.len()));
+    for f in &d.files {
+        let status = format!("{:?}", f.status).to_lowercase();
+        out.push_str(&format!("### `{}` — {status}\n", f.path.display()));
+        if let Some(old) = &f.old_path {
+            out.push_str(&format!("- Renamed from `{}`\n", old.display()));
+        }
+        for h in &f.hunks {
+            out.push_str(&format!(
+                "```diff\n@@ -{},{} +{},{} @@\n{}```\n",
+                h.old_start, h.old_lines, h.new_start, h.new_lines, h.body
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_diagnostics(d: &Diagnostics) -> String {
+    let mut out = String::new();
+    let err_count = d
+        .diagnostics
+        .iter()
+        .filter(|x| x.level == crate::collect::DiagLevel::Error)
+        .count();
+    out.push_str(&format!(
+        "Build {}; {} diagnostic(s), {} error(s).\n\n",
+        if d.success { "succeeded" } else { "failed" },
+        d.diagnostics.len(),
+        err_count,
+    ));
+    for diag in &d.diagnostics {
+        let code = diag.code.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "- **{:?}** {}: {}\n",
+            diag.level, code, diag.message
+        ));
+        if let Some(file) = diag.primary_file() {
+            if let Some(span) = diag.spans.iter().find(|s| s.is_primary) {
+                out.push_str(&format!(
+                    "  at `{}:{}:{}`\n",
+                    file.display(),
+                    span.line_start,
+                    span.col_start
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn mk_section(name: &str, content: &str, tokenizer: Tokenizer) -> Section {
     Section {
         name: name.into(),
@@ -231,19 +381,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_produces_non_empty_pack() {
+    fn builder_includes_prompt_section() {
         let pack = PackBuilder::new()
             .preset(Preset::Fix)
             .max_tokens(4000)
+            .stdin_prompt("why does this fail?")
+            .project_root(std::env::temp_dir()) // force empty collection
             .build()
             .expect("build pack");
-        assert!(!pack.sections.is_empty());
+        assert_eq!(pack.schema, "cargo-context/v1");
+        assert!(pack.sections.iter().any(|s| s.name.contains("Prompt")));
+    }
+
+    #[test]
+    fn builder_empty_workspace_is_valid() {
+        // A clean workspace with no diff and no errors produces an empty pack —
+        // that is a valid result, not an error.
+        let pack = PackBuilder::new()
+            .preset(Preset::Fix)
+            .project_root(std::env::temp_dir())
+            .build()
+            .expect("build pack");
         assert_eq!(pack.schema, "cargo-context/v1");
     }
 
     #[test]
     fn json_roundtrip() {
-        let pack = PackBuilder::new().build().unwrap();
+        let pack = PackBuilder::new()
+            .project_root(std::env::temp_dir())
+            .build()
+            .unwrap();
         let s = pack.render_json().unwrap();
         let _: Pack = serde_json::from_str(&s).unwrap();
     }
