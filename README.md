@@ -1,13 +1,5 @@
-As an AI Coding Configuration Expert, I view the "vibe coding" era as a shift from **writing code** to **curating context**. The bottleneck is no longer the AI's ability to generate syntax, but the developer's ability to feed the AI the precise "mental map" of the project without hitting token limits or introducing noise.
-
-`cargo-context` is designed to be the **Context Engine** for Rust developers. Instead of copy-pasting files, it surgically extracts the "delta" and the "skeleton" of the project.
-
-Here is the detailed technical specification for `cargo-context`.
-
----
-
-# 🛠️ Specification: `cargo-context`
-**Subtitle:** *High-Fidelity Context Engineering for Rust AI Workflows*
+# cargo-context
+*High-Fidelity Context Engineering for Rust AI Workflows*
 
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
