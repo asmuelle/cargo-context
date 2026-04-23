@@ -2,8 +2,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::{self, Budget, Priority, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP};
-use crate::collect::{self, Diagnostics, Diff, EntryPoints, WorkspaceMap};
+use crate::budget::{self, Budget, Priority, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS};
+use crate::collect::{self, Diagnostics, Diff, EntryPoints, RelatedTests, WorkspaceMap};
 use crate::error::Result;
 use crate::scrub::Scrubber;
 use crate::tokenize::Tokenizer;
@@ -209,12 +209,22 @@ impl PackBuilder {
                 ));
             }
         }
+
+        // Collect the diff once; share its paths with the tests collector.
+        let diff = if wants.diff || wants.tests {
+            collect::git_diff(&root, None).ok()
+        } else {
+            None
+        };
+
         if wants.diff {
-            if let Some(content) = try_collect_diff(&root) {
-                candidates.push((
-                    P_DIFF,
-                    mk_section("⚡ Intent (Git Diff)", &content, self.tokenizer),
-                ));
+            if let Some(d) = diff.as_ref() {
+                if !d.is_empty() {
+                    candidates.push((
+                        P_DIFF,
+                        mk_section("⚡ Intent (Git Diff)", &render_diff(d), self.tokenizer),
+                    ));
+                }
             }
         }
         if wants.map {
@@ -231,6 +241,20 @@ impl PackBuilder {
                     P_ENTRY,
                     mk_section("🧭 Entry Points", &content, self.tokenizer),
                 ));
+            }
+        }
+        if wants.tests {
+            if let Some(d) = diff.as_ref() {
+                if !d.is_empty() {
+                    let changed: Vec<std::path::PathBuf> =
+                        d.files.iter().map(|f| f.path.clone()).collect();
+                    if let Some(content) = try_collect_tests(&root, &changed) {
+                        candidates.push((
+                            P_TESTS,
+                            mk_section("🎯 Related Tests", &content, self.tokenizer),
+                        ));
+                    }
+                }
             }
         }
 
@@ -262,6 +286,7 @@ struct SectionWants {
     errors: bool,
     diff: bool,
     entry: bool,
+    tests: bool,
 }
 
 impl SectionWants {
@@ -272,18 +297,21 @@ impl SectionWants {
                 errors: true,
                 diff: true,
                 entry: false,
+                tests: true,
             },
             Preset::Feature => Self {
                 map: true,
                 errors: false,
                 diff: true,
                 entry: true,
+                tests: true,
             },
             Preset::Custom => Self {
                 map: true,
                 errors: false,
                 diff: true,
                 entry: true,
+                tests: true,
             },
         }
     }
@@ -293,12 +321,12 @@ fn try_collect_map(root: &Path) -> Option<String> {
     collect::cargo_metadata(root).ok().map(render_map)
 }
 
-fn try_collect_diff(root: &Path) -> Option<String> {
-    let d = collect::git_diff(root, None).ok()?;
-    if d.is_empty() {
+fn try_collect_tests(root: &Path, changed: &[std::path::PathBuf]) -> Option<String> {
+    let rt = collect::related_tests(root, changed).ok()?;
+    if rt.is_empty() {
         None
     } else {
-        Some(render_diff(&d))
+        Some(render_tests(&rt))
     }
 }
 
@@ -318,6 +346,35 @@ fn try_collect_entry(root: &Path) -> Option<String> {
     } else {
         Some(render_entry(&ep))
     }
+}
+
+fn render_tests(rt: &RelatedTests) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} related test file(s).\n\n", rt.files.len()));
+    for f in &rt.files {
+        let kind = match f.kind {
+            collect::TestKind::Integration => "integration",
+            collect::TestKind::UnitInline => "unit (inline)",
+        };
+        let reason = if f.matched_stems.is_empty() {
+            String::new()
+        } else {
+            format!(" — matched: `{}`", f.matched_stems.join("`, `"))
+        };
+        out.push_str(&format!(
+            "### `{}` — {} / {} ({} tests){}\n",
+            f.path.display(),
+            f.crate_name,
+            kind,
+            f.functions.len(),
+            reason,
+        ));
+        for fun in &f.functions {
+            out.push_str(&format!("- `{}`\n", fun.signature.trim()));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn render_entry(ep: &EntryPoints) -> String {

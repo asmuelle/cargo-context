@@ -9,8 +9,10 @@ pub mod diff;
 pub mod entry;
 pub mod errors;
 pub mod meta;
+pub mod tests_rs;
 
 pub use diff::{git_diff, Diff, DiffHunk, FileDiff, FileStatus};
 pub use entry::{entry_points, EntryFile, EntryKind, EntryPoints};
 pub use errors::{last_error, DiagLevel, DiagSpan, Diagnostic, Diagnostics};
 pub use meta::{cargo_metadata, DepKind, DependencyInfo, WorkspaceMap, WorkspaceMember};
+pub use tests_rs::{related_tests, RelatedTests, TestFile, TestFunction, TestKind};
