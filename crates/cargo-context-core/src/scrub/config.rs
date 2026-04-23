@@ -6,9 +6,9 @@
 
 use serde::Deserialize;
 
+use crate::scrub::Pattern;
 use crate::scrub::entropy::EntropyConfigRaw;
 use crate::scrub::paths::PathRulesRaw;
-use crate::scrub::Pattern;
 
 /// Root of `.cargo-context/scrub.yaml`.
 #[derive(Debug, Clone, Default, Deserialize)]

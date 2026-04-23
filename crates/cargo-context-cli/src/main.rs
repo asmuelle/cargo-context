@@ -7,10 +7,10 @@
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use cargo_context_core::{
-    scrub::{ScrubConfig, Scrubber},
     Budget, BudgetStrategy, ExpandMode, Format, PackBuilder, Preset, Tokenizer,
+    scrub::{ScrubConfig, Scrubber},
 };
 use clap::{Parser, Subcommand, ValueEnum};
 

@@ -35,7 +35,7 @@ if $is_rust; then
     # Format only the edited file. Cleaner diffs than `cargo fmt --all` and
     # avoids re-touching files Claude did not modify.
     if command -v rustfmt >/dev/null 2>&1; then
-        rustfmt --edition 2021 "$FILE_PATH" >/dev/null 2>&1 || true
+        rustfmt --edition 2024 "$FILE_PATH" >/dev/null 2>&1 || true
     fi
 
     # Per-crate `cargo check` is ~5x faster than workspace clippy. Full clippy

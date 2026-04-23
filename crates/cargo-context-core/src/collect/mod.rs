@@ -11,8 +11,8 @@ pub mod errors;
 pub mod meta;
 pub mod tests_rs;
 
-pub use diff::{git_diff, Diff, DiffHunk, FileDiff, FileStatus};
-pub use entry::{entry_points, EntryFile, EntryKind, EntryPoints};
-pub use errors::{last_error, DiagLevel, DiagSpan, Diagnostic, Diagnostics};
-pub use meta::{cargo_metadata, DepKind, DependencyInfo, WorkspaceMap, WorkspaceMember};
-pub use tests_rs::{related_tests, RelatedTests, TestFile, TestFunction, TestKind};
+pub use diff::{Diff, DiffHunk, FileDiff, FileStatus, git_diff};
+pub use entry::{EntryFile, EntryKind, EntryPoints, entry_points};
+pub use errors::{DiagLevel, DiagSpan, Diagnostic, Diagnostics, last_error};
+pub use meta::{DepKind, DependencyInfo, WorkspaceMap, WorkspaceMember, cargo_metadata};
+pub use tests_rs::{RelatedTests, TestFile, TestFunction, TestKind, related_tests};

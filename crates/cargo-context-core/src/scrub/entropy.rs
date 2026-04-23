@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::error::Result;
-use crate::scrub::{hash4, AllowList, Redaction, Severity};
+use crate::scrub::{AllowList, Redaction, Severity, hash4};
 
 /// Raw (deserialized) entropy configuration, before regex compilation.
 #[derive(Debug, Clone, Deserialize)]

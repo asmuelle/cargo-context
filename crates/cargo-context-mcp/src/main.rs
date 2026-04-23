@@ -18,11 +18,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use cargo_context_core::{Budget, BudgetStrategy, PackBuilder, Preset, Tokenizer};
 use rmcp::{
+    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
-    ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 

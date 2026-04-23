@@ -228,8 +228,8 @@ mod tests {
         // The default BPE has an empty vocab so it counts 0 tokens — what we
         // verify is that the loader did not fall back to the calibrated
         // heuristic (which would give a positive count for non-empty input).
-        use tokenizers::models::bpe::BPE;
         use tokenizers::Tokenizer as HfTokenizer;
+        use tokenizers::models::bpe::BPE;
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("tokenizer.json");

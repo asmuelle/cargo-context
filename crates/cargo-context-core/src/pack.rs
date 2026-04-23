@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::{self, Budget, Priority, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS};
+use crate::budget::{self, Budget, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS, Priority};
 use crate::collect::{self, Diagnostics, Diff, EntryPoints, RelatedTests, WorkspaceMap};
 use crate::error::Result;
 use crate::expand::{self, ExpandMode};
@@ -423,11 +423,7 @@ fn try_collect_expansion(root: &Path, mode: ExpandMode, diff: Option<&Diff>) -> 
             Ok(None) | Err(_) => continue,
         }
     }
-    if expanded_any {
-        Some(out)
-    } else {
-        None
-    }
+    if expanded_any { Some(out) } else { None }
 }
 
 fn try_collect_tests(root: &Path, changed: &[std::path::PathBuf]) -> Option<String> {
