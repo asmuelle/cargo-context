@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "ecc@ecc": true
-  },
   "hooks": {
     "PreToolUse": [
       {
