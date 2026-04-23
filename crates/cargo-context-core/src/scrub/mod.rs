@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::Result;
 
-pub use config::{BuiltinsMode, ScrubConfig};
+pub use config::{BuiltinsMode, ReportConfig, ScrubConfig};
 pub use entropy::EntropyConfig;
 pub use paths::PathRules;
 
@@ -135,6 +135,13 @@ pub struct Scrubber {
     allowlist: AllowList,
     entropy: EntropyConfig,
     paths: PathRules,
+    report: ReportConfig,
+    /// Count of effectively disabled built-in rules (for `scrub --check`
+    /// reporting). Includes both `disable_builtins` removals and the whole
+    /// set dropped under `builtins: replace`.
+    effective_builtin_count: usize,
+    /// Count of user-defined patterns loaded from `patterns[]`.
+    effective_custom_count: usize,
 }
 
 impl Scrubber {
@@ -145,11 +152,15 @@ impl Scrubber {
     /// Built-in regex patterns only; no entropy, no path rules.
     pub fn with_builtins() -> Result<Self> {
         let patterns = builtin_patterns()?;
+        let effective_builtin_count = patterns.len();
         Ok(Self {
             patterns,
             allowlist: AllowList::default(),
             entropy: EntropyConfig::default(),
             paths: PathRules::default(),
+            report: ReportConfig::default(),
+            effective_builtin_count,
+            effective_custom_count: 0,
         })
     }
 
@@ -166,8 +177,10 @@ impl Scrubber {
                 config.disable_builtins.iter().map(String::as_str).collect();
             patterns.retain(|p| !drop.contains(p.id.as_str()));
         }
+        let effective_builtin_count = patterns.len();
 
         // User-defined patterns.
+        let effective_custom_count = config.patterns.len();
         for p in &config.patterns {
             patterns.push(compile_pattern(p)?);
         }
@@ -187,6 +200,9 @@ impl Scrubber {
             allowlist,
             entropy: EntropyConfig::from_raw(&config.entropy)?,
             paths: PathRules::from_raw(&config.paths)?,
+            report: config.report.clone(),
+            effective_builtin_count,
+            effective_custom_count,
         })
     }
 
@@ -278,6 +294,82 @@ impl Scrubber {
     pub fn is_path_redacted(&self, path: &Path) -> bool {
         !self.paths.is_excluded(path) && self.paths.is_redact_whole(path)
     }
+
+    /// Return `true` if `path` is on the exclude list (bypasses all scrubbing).
+    pub fn is_path_excluded(&self, path: &Path) -> bool {
+        self.paths.is_excluded(path)
+    }
+
+    /// Report config (typically loaded from `.cargo-context/scrub.yaml`).
+    pub fn report_config(&self) -> &ReportConfig {
+        &self.report
+    }
+
+    /// Number of built-in patterns that survived `disable_builtins` and
+    /// `BuiltinsMode::Replace` filters. Used by `cargo context scrub --check`.
+    pub fn effective_builtin_count(&self) -> usize {
+        self.effective_builtin_count
+    }
+
+    /// Number of user-defined `patterns[]` entries from the config.
+    pub fn effective_custom_count(&self) -> usize {
+        self.effective_custom_count
+    }
+
+    /// Append each redaction to `report.log_file` as JSON Lines, if configured.
+    /// Values are never written — only `rule_id`, `category`, `severity`, and
+    /// the SHA-256 fingerprint (`hash4`). Timestamps are Unix epoch seconds.
+    pub fn log_redactions(&self, report: &ScrubReport) -> Result<()> {
+        let Some(path) = &self.report.log_file else {
+            return Ok(());
+        };
+        if report.redactions.is_empty() {
+            return Ok(());
+        }
+        append_log_lines(path, &report.redactions)
+    }
+}
+
+fn append_log_lines(path: &Path, redactions: &[Redaction]) -> Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for r in redactions {
+        let line = serde_json::to_string(&LogEntry {
+            ts,
+            rule_id: &r.rule_id,
+            category: &r.category,
+            severity: r.severity,
+            hash4: &r.hash4,
+        })?;
+        writeln!(file, "{line}")?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct LogEntry<'a> {
+    ts: u64,
+    rule_id: &'a str,
+    category: &'a str,
+    severity: Severity,
+    hash4: &'a str,
 }
 
 fn compile_pattern(p: &Pattern) -> Result<CompiledPattern> {
@@ -472,6 +564,84 @@ mod tests {
         };
         let s = Scrubber::from_config(&config).unwrap();
         assert_eq!(s.scrub("AKIAIOSFODNN7EXAMPLE"), "AKIAIOSFODNN7EXAMPLE");
+    }
+
+    #[test]
+    fn log_redactions_writes_values_free_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("scrub.log");
+        let config = ScrubConfig {
+            report: ReportConfig {
+                log_file: Some(log_path.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let scrubber = Scrubber::from_config(&config).unwrap();
+        let (_, report) = scrubber.scrub_with_report(
+            "AWS_KEY=AKIAIOSFODNN7EXAMPLE and jwt: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.abcDEF-_xyz",
+        );
+        assert!(!report.is_empty());
+
+        scrubber.log_redactions(&report).unwrap();
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), report.redactions.len());
+        // Each line is JSON with no actual secret values.
+        for (line, r) in lines.iter().zip(&report.redactions) {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed["rule_id"], r.rule_id);
+            assert_eq!(parsed["category"], r.category);
+            assert_eq!(parsed["hash4"], r.hash4);
+            assert!(parsed["ts"].as_u64().unwrap() > 0);
+            // Values are never written.
+            assert!(!line.contains("AKIAIOSFODNN7EXAMPLE"));
+            assert!(!line.contains("eyJhbGciOi"));
+        }
+    }
+
+    #[test]
+    fn log_redactions_noop_when_unconfigured() {
+        let scrubber = Scrubber::with_builtins().unwrap();
+        let (_, report) = scrubber.scrub_with_report("AWS_KEY=AKIAIOSFODNN7EXAMPLE");
+        // No log_file configured → no-op, no error.
+        scrubber.log_redactions(&report).unwrap();
+    }
+
+    #[test]
+    fn log_redactions_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("nested/dir/scrub.log");
+        let config = ScrubConfig {
+            report: ReportConfig {
+                log_file: Some(log_path.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let scrubber = Scrubber::from_config(&config).unwrap();
+        let (_, report) = scrubber.scrub_with_report("AWS_KEY=AKIAIOSFODNN7EXAMPLE");
+        scrubber.log_redactions(&report).unwrap();
+        assert!(log_path.exists());
+    }
+
+    #[test]
+    fn effective_counts_reflect_config() {
+        let config = ScrubConfig {
+            disable_builtins: vec!["jwt".into()],
+            patterns: vec![Pattern {
+                id: "x".into(),
+                regex: "xx".into(),
+                category: "test".into(),
+                replacement: None,
+                severity: Severity::Low,
+            }],
+            ..Default::default()
+        };
+        let s = Scrubber::from_config(&config).unwrap();
+        // Built-ins minus jwt.
+        assert!(s.effective_builtin_count() > 0);
+        assert_eq!(s.effective_custom_count(), 1);
     }
 
     #[test]

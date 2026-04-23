@@ -199,6 +199,15 @@ impl PackBuilder {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+        // Build the scrubber once, up front. The diff renderer consults it
+        // for path-level `redact_whole` rules; the content scrubber pass
+        // (below) reuses the same instance.
+        let scrubber = if self.scrub {
+            Scrubber::with_workspace(&root)?
+        } else {
+            Scrubber::empty()
+        };
+
         let mut candidates: Vec<(Priority, Section)> = Vec::new();
 
         if let Some(prompt) = &self.stdin_prompt {
@@ -246,7 +255,7 @@ impl PackBuilder {
                         P_DIFF,
                         mk_section(
                             "⚡ Intent (Git Diff)",
-                            &render_diff_ordered(d, &error_files),
+                            &render_diff_ordered(d, &error_files, &scrubber),
                             &self.tokenizer,
                         ),
                     ));
@@ -294,13 +303,14 @@ impl PackBuilder {
 
         let mut scrub_report = crate::scrub::ScrubReport::default();
         if self.scrub {
-            let scrubber = Scrubber::with_workspace(&root)?;
             for (_, s) in candidates.iter_mut() {
                 let (scrubbed, report) = scrubber.scrub_with_report(&s.content);
                 s.content = scrubbed;
                 s.token_estimate = self.tokenizer.count(&s.content);
                 scrub_report.redactions.extend(report.redactions);
             }
+            // Honor `report.log_file` if set in scrub.yaml.
+            scrubber.log_redactions(&scrub_report)?;
         }
 
         let alloc = budget::allocate(candidates, &self.budget, &self.tokenizer);
@@ -524,7 +534,16 @@ fn render_map(m: WorkspaceMap) -> String {
 /// Render a diff with files containing primary error spans ordered first.
 /// Under budget pressure, earlier sections survive truncation, so this
 /// keeps the most signal-dense files when the budget forces a cut.
-fn render_diff_ordered(d: &Diff, error_files: &[std::path::PathBuf]) -> String {
+///
+/// The `scrubber` argument consults `redact_whole` globs: files that match
+/// render with their hunks elided and a `[REDACTED FILE: ...]` marker in
+/// their place — keeping the fact-of-change visible without leaking the
+/// contents (e.g. for `.env` or `.pem` files that showed up in the diff).
+fn render_diff_ordered(
+    d: &Diff,
+    error_files: &[std::path::PathBuf],
+    scrubber: &Scrubber,
+) -> String {
     let error_set: std::collections::HashSet<&Path> =
         error_files.iter().map(|p| p.as_path()).collect();
 
@@ -543,35 +562,55 @@ fn render_diff_ordered(d: &Diff, error_files: &[std::path::PathBuf]) -> String {
                 || error_files.iter().any(|e| path_matches_suffix(&f.path, e))
         })
         .count();
+    let path_redacted_count = files
+        .iter()
+        .filter(|f| scrubber.is_path_redacted(&f.path))
+        .count();
 
     let mut out = String::new();
+    let mut header = format!("{} file(s) changed", d.files.len());
     if errored_count > 0 {
-        out.push_str(&format!(
-            "{} file(s) changed; {} touched by compiler errors (shown first).\n\n",
-            d.files.len(),
-            errored_count
+        header.push_str(&format!(
+            "; {errored_count} touched by compiler errors (shown first)"
         ));
-    } else {
-        out.push_str(&format!("{} file(s) changed.\n\n", d.files.len()));
     }
+    if path_redacted_count > 0 {
+        header.push_str(&format!("; {path_redacted_count} redacted by path rules"));
+    }
+    out.push_str(&format!("{header}.\n\n"));
+
     for f in files {
         let status = format!("{:?}", f.status).to_lowercase();
-        let marker = if error_set.contains(f.path.as_path())
+        let error_marker = if error_set.contains(f.path.as_path())
             || error_files.iter().any(|e| path_matches_suffix(&f.path, e))
         {
             " ⚠"
         } else {
             ""
         };
-        out.push_str(&format!("### `{}` — {status}{marker}\n", f.path.display()));
+        let redacted = scrubber.is_path_redacted(&f.path);
+        let redact_marker = if redacted { " 🔒" } else { "" };
+
+        out.push_str(&format!(
+            "### `{}` — {status}{error_marker}{redact_marker}\n",
+            f.path.display()
+        ));
         if let Some(old) = &f.old_path {
             out.push_str(&format!("- Renamed from `{}`\n", old.display()));
         }
-        for h in &f.hunks {
+        if redacted {
             out.push_str(&format!(
-                "```diff\n@@ -{},{} +{},{} @@\n{}```\n",
-                h.old_start, h.old_lines, h.new_start, h.new_lines, h.body
+                "[REDACTED FILE: {} — {} hunk(s) elided by scrub.yaml path rules]\n",
+                f.path.display(),
+                f.hunks.len()
             ));
+        } else {
+            for h in &f.hunks {
+                out.push_str(&format!(
+                    "```diff\n@@ -{},{} +{},{} @@\n{}```\n",
+                    h.old_start, h.old_lines, h.new_start, h.new_lines, h.body
+                ));
+            }
         }
         out.push('\n');
     }
@@ -703,7 +742,8 @@ mod tests {
             ],
         };
         let errors = vec![std::path::PathBuf::from("src/broken.rs")];
-        let rendered = render_diff_ordered(&d, &errors);
+        let scrubber = Scrubber::empty();
+        let rendered = render_diff_ordered(&d, &errors, &scrubber);
         // The broken file should render before the unrelated ones.
         let broken_pos = rendered.find("broken.rs").unwrap();
         let unrelated_pos = rendered.find("unrelated.rs").unwrap();
@@ -740,9 +780,76 @@ mod tests {
                 },
             ],
         };
-        let rendered = render_diff_ordered(&d, &[]);
+        let scrubber = Scrubber::empty();
+        let rendered = render_diff_ordered(&d, &[], &scrubber);
         assert!(rendered.find("a.rs").unwrap() < rendered.find("b.rs").unwrap());
         // No warning marker when no errors are present.
         assert!(!rendered.contains('⚠'));
+    }
+
+    #[test]
+    fn render_diff_path_rules_redact_matching_files() {
+        use crate::collect::{Diff, FileDiff, FileStatus};
+        use crate::scrub::ScrubConfig;
+
+        let d = Diff {
+            range: None,
+            files: vec![
+                FileDiff {
+                    path: std::path::PathBuf::from("src/lib.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: vec![crate::collect::DiffHunk {
+                        old_start: 1,
+                        old_lines: 1,
+                        new_start: 1,
+                        new_lines: 1,
+                        body: "-old\n+new\n".into(),
+                    }],
+                    binary: false,
+                },
+                FileDiff {
+                    path: std::path::PathBuf::from(".env"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: vec![crate::collect::DiffHunk {
+                        old_start: 1,
+                        old_lines: 1,
+                        new_start: 1,
+                        new_lines: 1,
+                        body: "-SECRET=old\n+SECRET=new\n".into(),
+                    }],
+                    binary: false,
+                },
+            ],
+        };
+        let config = ScrubConfig {
+            paths: crate::scrub::paths::PathRulesRaw {
+                redact_whole: vec!["**/.env".into()],
+                exclude: vec![],
+            },
+            ..Default::default()
+        };
+        let scrubber = Scrubber::from_config(&config).unwrap();
+        let rendered = render_diff_ordered(&d, &[], &scrubber);
+
+        // .env's hunk body is elided; lib.rs's isn't.
+        assert!(
+            !rendered.contains("SECRET=new"),
+            "redacted hunk content leaked into diff render: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED FILE: .env"));
+        assert!(
+            rendered.contains("+new"),
+            "non-redacted file should still render normally"
+        );
+        assert!(
+            rendered.contains('🔒'),
+            "redacted file should carry lock marker"
+        );
+        assert!(
+            rendered.contains("1 redacted by path rules"),
+            "header should report path-redacted count; got:\n{rendered}"
+        );
     }
 }

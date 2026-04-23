@@ -9,14 +9,19 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use cargo_context_core::{
+    scrub::{ScrubConfig, Scrubber},
     Budget, BudgetStrategy, ExpandMode, Format, PackBuilder, Preset, Tokenizer,
 };
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// High-fidelity context engineering for Rust AI workflows.
 #[derive(Debug, Parser)]
 #[command(name = "cargo-context", version, about)]
 struct Args {
+    /// Optional subcommand. When omitted, the default flow assembles a pack.
+    #[command(subcommand)]
+    cmd: Option<Command>,
+
     /// Preset workflow. Custom assembles only what the other flags request.
     #[arg(long, value_enum, default_value_t = PresetArg::Custom)]
     preset: PresetArg,
@@ -81,6 +86,24 @@ struct Args {
     /// Paths to exclude (glob allowed).
     #[arg(long = "exclude-path")]
     exclude_paths: Vec<String>,
+}
+
+/// Subcommands. When none is given, the default flow builds a context pack.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Scrubber operations.
+    Scrub(ScrubArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ScrubArgs {
+    /// Validate the effective scrub.yaml configuration and print a summary.
+    #[arg(long)]
+    check: bool,
+
+    /// Path to a scrub.yaml (defaults to `.cargo-context/scrub.yaml`).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -185,6 +208,15 @@ fn main() -> Result<()> {
     }
     let args = Args::parse_from(argv);
 
+    // Subcommand short-circuits: `scrub --check` validates YAML without
+    // building a pack. Anything else falls through to the default pack flow.
+    if let Some(Command::Scrub(ref scrub_args)) = args.cmd {
+        if scrub_args.check {
+            return run_scrub_check(scrub_args.config.as_deref());
+        }
+        bail!("`cargo-context scrub` requires a subcommand flag (--check)");
+    }
+
     let preset = if args.fix {
         Preset::Fix
     } else if args.feature {
@@ -254,6 +286,95 @@ fn main() -> Result<()> {
             pack.scrub.redactions.len()
         );
         std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// Implements `cargo-context scrub --check`: parse the YAML config and print
+/// a summary of the effective rule set. Exits 0 on success; on parse failure,
+/// prints the error to stderr and exits 1.
+fn run_scrub_check(config_path: Option<&std::path::Path>) -> Result<()> {
+    let path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let cwd = std::env::current_dir()?;
+            cwd.join(".cargo-context/scrub.yaml")
+        }
+    };
+
+    if !path.exists() {
+        eprintln!("✗ config not found: {}", path.display());
+        std::process::exit(1);
+    }
+
+    let raw = std::fs::read_to_string(&path)?;
+    let config: ScrubConfig = match serde_yaml::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("✗ {} — {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let scrubber = match Scrubber::from_config(&config) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {} — {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+
+    // Emit a human summary to stdout. A machine-readable --format=json would
+    // be a reasonable follow-up.
+    println!("✓ {} v{} parsed", path.display(), config.version);
+    println!();
+    println!("Effective rules:");
+    println!(
+        "  {} built-in pattern(s) active",
+        scrubber.effective_builtin_count()
+    );
+    println!(
+        "  {} custom pattern(s) loaded",
+        scrubber.effective_custom_count()
+    );
+    if !config.disable_builtins.is_empty() {
+        println!("  disabled: {}", config.disable_builtins.join(", "));
+    }
+    println!();
+    println!("Entropy detection:");
+    if config.entropy.enabled {
+        println!(
+            "  enabled (min_length={}, threshold={}, {} context key(s))",
+            config.entropy.min_length,
+            config.entropy.threshold,
+            config.entropy.context_keys.len()
+        );
+    } else {
+        println!("  disabled");
+    }
+    println!();
+    println!("Paths:");
+    println!(
+        "  redact_whole: {} glob(s)",
+        config.paths.redact_whole.len()
+    );
+    println!("  exclude:      {} glob(s)", config.paths.exclude.len());
+    println!();
+    println!(
+        "Allowlist: {} entries ({} exact, {} regex)",
+        config.allowlist.len(),
+        config
+            .allowlist
+            .iter()
+            .filter(|a| a.exact.is_some())
+            .count(),
+        config
+            .allowlist
+            .iter()
+            .filter(|a| a.regex.is_some())
+            .count(),
+    );
+    if let Some(log) = &config.report.log_file {
+        println!("Log file:  {}", log.display());
     }
     Ok(())
 }

@@ -16,3 +16,4 @@ path = "src/main.rs"
 cargo-context-core = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde_yaml = { workspace = true }
