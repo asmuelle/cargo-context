@@ -143,7 +143,7 @@ struct BodyStripper;
 
 impl VisitMut for BodyStripper {
     fn visit_item_fn_mut(&mut self, node: &mut syn::ItemFn) {
-        node.block = Box::new(stub_block());
+        *node.block = stub_block();
         // Recurse so nested `fn` inside `mod`s also get stripped (handled via
         // visit_item_mod_mut).
     }
