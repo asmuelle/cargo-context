@@ -4,7 +4,7 @@
 [![CI](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml)
 [![Release](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.85%2B-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-blue.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0.html)
 
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
@@ -478,7 +478,7 @@ The `core` crate has **zero** async runtime dependency — `tokio` lives only in
 
 ### 9.3 MSRV & Release
 
-- **MSRV:** Rust 1.85 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
+- **MSRV:** Rust 1.88 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
 - **Release:** `xtask release` cuts all four crates in lockstep with matching versions. `cargo-context-core` is semver-stable from `0.1`; binaries follow.
 
 ---
