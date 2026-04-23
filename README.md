@@ -6,6 +6,39 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-blue.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0.html)
 
+## Install
+
+```bash
+# Build from source (Rust 1.88+, edition 2024)
+git clone https://github.com/asmuelle/cargo-context
+cd cargo-context
+cargo install --path crates/cargo-context-cli
+cargo install --path crates/cargo-context-mcp
+```
+
+Pre-built binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows ship from each tagged release on the [Releases page](https://github.com/asmuelle/cargo-context/releases).
+
+Optional companions:
+- `cargo install cargo-expand` — enables `--expand-macros`
+- A local HuggingFace `tokenizer.json` — enables exact `--hf-llama3-vocab` counting
+
+## Status
+
+What's implemented and shipping today:
+
+| Surface | Status |
+|:---|:---|
+| **Collection** — git diff, cargo metadata, compiler errors, entry points (syn-based signature extraction), related tests (integration + inline `#[cfg(test)]`) | ✅ |
+| **Token budget** — Priority / Proportional / Truncate strategies; user prompt always exempt | ✅ |
+| **Tokenizers** — `tiktoken-rs` for GPT/Claude (exact); calibrated heuristic for llama; `HfLlama3 { vocab_path }` for any local HF `tokenizer.json` | ✅ |
+| **Scrubber** — built-in regex (AWS/GitHub/OpenAI/Anthropic/HF/Google/Slack/JWT/PEM); Shannon-entropy detection; path-globs (`.env`, `*.pem`, …); allowlist; YAML config; JSONL audit log | ✅ |
+| **Macro expansion** — `cargo-expand` shell-out with `(path, mtime, lockhash)` cache | ✅ |
+| **MCP server** — `cargo-context-mcp` binary on the official `rmcp` SDK; four tools | ✅ |
+| **CLI** — `cargo context [pack flags]` and `cargo context scrub --check`; `--files-from <PATH\|->` for cargo-impact interop; `--scrub-report` / `--strict-scrub` for CI | ✅ |
+| **Output formats** — markdown / xml / json / plain | ✅ |
+| **MCP resources & prompts** | 🚧 (only tools today) |
+| **`--impact-scope` JSON envelope** ([#5](https://github.com/asmuelle/cargo-context/issues/5)) | 🚧 |
+
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
 1. **The Symptom:** What is broken? (Recent errors)
@@ -50,29 +83,79 @@ Ensures the AI writes code that is actually testable.
 
 ## 3. CLI Interface (UX)
 
+### 3.1 Common workflows
+
 ```bash
-# Basic usage: Generate a pack for the current state
+# Default — assemble a pack from whatever's relevant in cwd
 cargo context
 
-# "I'm fixing a bug" mode: Diff + Last Error + Related Tests
+# "I'm fixing a bug" preset: errors + diff + related tests
 cargo context --fix
 
-# "I'm building a feature" mode: Metadata + Entry points + Diff
+# "I'm building a feature" preset: map + diff + entry points + related tests
 cargo context --feature
 
-# Pipe directly to a clipboard tool for immediate LLM pasting
-cargo context --fix | pbcopy
+# Pipe to a clipboard
+cargo context --fix | pbcopy          # macOS
+cargo context --fix | wl-copy          # Wayland
+
+# Ask a question alongside the pack (stdin → "📝 User Prompt" section)
+echo "why does verify_token return None?" | cargo context --fix
+
+# Scope to specific files (cargo-impact interop)
+cargo impact --context | cargo context --files-from -
+
+# Validate the scrubber config without building a pack
+cargo context scrub --check
 ```
 
-### Command Flags:
-| Flag | Description | Effect |
+### 3.2 Pack flags
+
+| Flag | Default | Effect |
 | :--- | :--- | :--- |
-| `-d, --diff` | Include git changes | Adds `git diff` output to the pack. |
-| `-e, --errors` | Include compiler errors | Runs `cargo check` and captures stderr. |
-| `-m, --meta` | Include project map | Adds `Cargo.toml` and workspace structure. |
-| `-t, --tests` | Include relevant tests | Finds tests that reference changed files. |
-| `-f, --format` | Output format | `markdown` (default), `json`, or `xml`. |
-| `--deep` | Full file inclusion | Includes full source of all referenced files. |
+| `--preset <fix\|feature\|custom>` | `custom` | Selects which collectors run. `--fix` and `--feature` are shorthands. |
+| `--max-tokens <N>` | `8000` | Hard ceiling on assembled pack size. |
+| `--reserve-tokens <N>` | `2000` | Subtracted from `--max-tokens`; budget for the model's response. |
+| `--budget-strategy <priority\|proportional\|truncate>` | `priority` | How to reconcile candidates with the token limit. |
+| `--tokenizer <…>` | `llama3` | `llama3` / `llama2` / `tiktoken-cl100k` / `tiktoken-o200k` / `claude` / `chars-div4`. |
+| `--hf-llama3-vocab <PATH>` | — | Exact counting via a local HuggingFace `tokenizer.json`. Overrides `--tokenizer`. |
+| `--expand-macros <off\|auto\|on>` | `off` | Run `cargo-expand` and include expanded source. Auto fires when the diff has `.rs` files. |
+| `-f, --format <markdown\|xml\|json\|plain>` | `markdown` | Output format. Use `xml` for Claude, `json` for programmatic consumers. |
+| `--files-from <PATH\|->` | — | Newline-delimited repo-relative paths to embed in a "📂 Scoped Files" section. `-` reads stdin. |
+| `--include-path <GLOB>` | — | Force-include paths (repeatable). |
+| `--exclude-path <GLOB>` | — | Exclude paths (repeatable). |
+
+### 3.3 Scrubber flags
+
+| Flag | Effect |
+| :--- | :--- |
+| `--no-scrub` | Disable secret scrubbing entirely. Requires `--i-know-what-im-doing`. |
+| `--scrub-report` | Print a per-category summary to stderr, e.g. `[scrub] 4 redacted (aws_key:3, jwt:1)`. |
+| `--strict-scrub` | Exit `2` if any redaction occurred. CI-friendly tripwire. |
+
+### 3.4 Subcommand: `cargo context scrub --check`
+
+Validate `.cargo-context/scrub.yaml` (or any path passed via `--config`) and print a summary of the effective rule set:
+
+```text
+$ cargo context scrub --check
+✓ .cargo-context/scrub.yaml v1 parsed
+
+Effective rules:
+  10 built-in pattern(s) active
+  2 custom pattern(s) loaded
+
+Entropy detection:
+  enabled (min_length=20, threshold=4.5, 6 context key(s))
+
+Paths:
+  redact_whole: 7 glob(s)
+  exclude:      1 glob(s)
+
+Allowlist: 2 entries (0 exact, 2 regex)
+```
+
+Parse errors and invalid globs exit `1` with `✗ <path>:<line>:<col> — <message>` on stderr — suitable for a pre-commit hook.
 
 ---
 
@@ -315,43 +398,37 @@ echo "Why does verify_token return None for valid JWTs?" \
 
 ### 8.2 MCP Server Mode
 
-For agentic coding tools (Claude Code, Cursor, Continue, Zed AI) that speak the **Model Context Protocol**, `cargo-context` runs as a long-lived stdio or SSE server:
+For agentic coding tools that speak the **Model Context Protocol** (Claude Code, Cursor, Continue, Zed AI), `cargo-context-mcp` runs as a long-lived stdio child process. Built on the official [`rmcp`](https://crates.io/crates/rmcp) SDK — full protocol compliance (initialize handshake, capability negotiation, structured content, JSON Schema for every tool's input).
 
 ```bash
-# stdio transport (default; what Claude Code / Cursor spawn)
-cargo context mcp
-
-# SSE transport on localhost (for browser-based clients)
-cargo context mcp --transport=sse --port=7878
+# Spawn directly to verify
+cargo-context-mcp
 ```
 
-**Exposed MCP primitives:**
+**Exposed tools** (as of v0.1.0 — resources and prompts are roadmap):
 
-| Kind | Name | Arguments | Returns |
-| :--- | :--- | :--- | :--- |
-| `tool` | `build_context_pack` | `{ preset: "fix"\|"feature"\|"custom", max_tokens?, tokenizer?, include_paths?, exclude_paths? }` | Pack as text resource |
-| `tool` | `get_last_error` | `{}` | Captured compiler diagnostics + referenced files |
-| `tool` | `get_diff` | `{ range?: "HEAD~3..HEAD" }` | Scrubbed diff with file-level summaries |
-| `tool` | `expand_macros` | `{ file: string, item?: string }` | Macro-expanded source |
-| `resource` | `cargo-context://pack/current` | — | Live pack for the cwd, refreshed on read |
-| `resource` | `cargo-context://map` | — | Workspace structure only (cheap, cacheable) |
-| `prompt` | `fix_compiler_error` | `{}` | Pre-formatted prompt pairing pack + instruction |
+| Tool | Arguments | Returns |
+| :--- | :--- | :--- |
+| `build_context_pack` | `{ preset?, max_tokens?, reserve_tokens?, tokenizer?, budget_strategy? }` | Rendered markdown pack (string) |
+| `get_last_error` | `{}` | Structured `Diagnostics` JSON (level, code, message, primary spans) |
+| `get_diff` | `{ range?: "HEAD~3..HEAD" }` | Structured `Diff` JSON (FileDiff[] with hunks) |
+| `expand_macros` | `{ file: string, crate_name: string }` | Expanded source via `cargo-expand` |
 
-**Client config example (Claude Code `.mcp.json`):**
+**Client config — Claude Code (`.claude/mcp.json` or `~/.config/claude-code/mcp.json`):**
 
 ```json
 {
   "mcpServers": {
     "cargo-context": {
-      "command": "cargo",
-      "args": ["context", "mcp"],
-      "env": { "CARGO_CONTEXT_MAX_TOKENS": "12000" }
+      "command": "cargo-context-mcp"
     }
   }
 }
 ```
 
-Scrubbing, token budgeting, and macro expansion all apply identically in MCP mode — the protocol boundary does not relax the guarantees.
+**Client config — Cursor / Continue / Zed:** same shape, just point at the binary on `PATH`. Working directory is whatever the client launches the server in; tools always operate on `std::env::current_dir()`.
+
+Scrubbing, token budgeting, macro expansion, and `.cargo-context/scrub.yaml` auto-discovery all apply identically in MCP mode — the protocol boundary does not relax the guarantees. Diagnostics go to stderr via `tracing`; stdout stays a clean JSON-RPC channel.
 
 ### 8.3 Library Crate (`cargo_context_core`)
 
