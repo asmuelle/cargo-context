@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: write
+  # Required for SLSA build provenance attestations.
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -80,6 +83,14 @@ jobs:
             tar czf "${STAGE}.tar.gz" "$STAGE"
             echo "asset=${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"
           fi
+
+      # SLSA v1 build provenance — anyone can verify the binary came from
+      # this repo + this workflow + this commit:
+      #   gh attestation verify <archive> --owner asmuelle
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.package.outputs.asset }}
 
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')

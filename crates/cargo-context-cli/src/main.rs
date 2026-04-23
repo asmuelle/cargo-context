@@ -97,6 +97,18 @@ struct Args {
     /// verbatim (subject to scrubbing and budget).
     #[arg(long, value_name = "PATH")]
     files_from: Option<String>,
+
+    /// Consume a `cargo-impact --format=json` envelope and embed every
+    /// referenced file as a Scoped File. Equivalent to running
+    /// cargo-impact and then `--files-from`, but reads the structured
+    /// JSON directly so future revisions can also surface
+    /// confidence/tier as scrubber-style filters.
+    ///
+    /// Path discovery is forgiving: extracts `findings[].primary_path`,
+    /// `findings[].impact_surface.primary_path`, and `findings[].path`
+    /// — whichever the upstream version provides.
+    #[arg(long, value_name = "PATH", conflicts_with = "files_from")]
+    impact_scope: Option<PathBuf>,
 }
 
 /// Subcommands. When none is given, the default flow builds a context pack.
@@ -260,7 +272,7 @@ fn main() -> Result<()> {
     // stdin-prompt path. Resolve before the prompt block so we don't
     // double-consume the stream.
     let files_from_uses_stdin = args.files_from.as_deref() == Some("-");
-    let files_from_paths: Vec<PathBuf> = match args.files_from.as_deref() {
+    let mut files_from_paths: Vec<PathBuf> = match args.files_from.as_deref() {
         None => Vec::new(),
         Some("-") => {
             let mut buf = String::new();
@@ -273,6 +285,17 @@ fn main() -> Result<()> {
             parse_files_list(&raw)
         }
     };
+
+    // `--impact-scope` is structurally equivalent to `--files-from`: extract
+    // the affected paths from the cargo-impact JSON envelope and route them
+    // through the same Scoped Files section. clap's `conflicts_with` ensures
+    // we don't see both at once.
+    if let Some(impact_path) = &args.impact_scope {
+        let raw = std::fs::read_to_string(impact_path)
+            .map_err(|e| anyhow::anyhow!("failed to read --impact-scope {impact_path:?}: {e}"))?;
+        files_from_paths = parse_impact_envelope(&raw)
+            .map_err(|e| anyhow::anyhow!("failed to parse --impact-scope JSON: {e}"))?;
+    }
 
     let mut builder = PackBuilder::new()
         .preset(preset)
@@ -332,6 +355,91 @@ fn parse_files_list(raw: &str) -> Vec<PathBuf> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(PathBuf::from)
         .collect()
+}
+
+/// Extract repo-relative paths from a `cargo-impact --format=json` envelope.
+///
+/// The envelope is `{ "findings": [ { ... }, ... ] }` (other top-level
+/// fields are ignored). For each finding we try, in order:
+///
+/// 1. `findings[i].primary_path`
+/// 2. `findings[i].impact_surface.primary_path`
+/// 3. `findings[i].path`
+/// 4. The `kind` payload's nested `primary_path` (any object with that key)
+///
+/// Whichever lands first wins. Findings without a discoverable path are
+/// silently skipped — this is forgiving by design so a schema bump in
+/// cargo-impact doesn't brick our parser. Duplicate paths are deduped while
+/// preserving first-seen order so the resulting list is stable across runs.
+fn parse_impact_envelope(raw: &str) -> serde_json::Result<Vec<PathBuf>> {
+    use serde_json::Value;
+
+    let envelope: Value = serde_json::from_str(raw)?;
+    let findings = match envelope.get("findings").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for finding in findings {
+        if let Some(p) = pluck_primary_path(finding)
+            && seen.insert(p.clone())
+        {
+            out.push(PathBuf::from(p));
+        }
+    }
+    Ok(out)
+}
+
+/// Recursively look for a `primary_path` (or `path`) string inside a
+/// finding. Order-of-preference: top-level `primary_path`, then
+/// `impact_surface.primary_path`, then any nested `primary_path`, then
+/// top-level `path`. The `kind` payload is searched too.
+fn pluck_primary_path(finding: &serde_json::Value) -> Option<String> {
+    if let Some(s) = finding.get("primary_path").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    if let Some(s) = finding
+        .pointer("/impact_surface/primary_path")
+        .and_then(|v| v.as_str())
+    {
+        return Some(s.to_string());
+    }
+    if let Some(found) = walk_for_key(finding, "primary_path") {
+        return Some(found);
+    }
+    if let Some(s) = finding.get("path").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    None
+}
+
+fn walk_for_key(v: &serde_json::Value, key: &str) -> Option<String> {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(val) = map.get(key)
+                && let Some(s) = val.as_str()
+            {
+                return Some(s.to_string());
+            }
+            for child in map.values() {
+                if let Some(found) = walk_for_key(child, key) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(found) = walk_for_key(item, key) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Implements `cargo-context scrub --check`: parse the YAML config and print
@@ -421,4 +529,77 @@ fn run_scrub_check(config_path: Option<&std::path::Path>) -> Result<()> {
         println!("Log file:  {}", log.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_top_level_primary_path() {
+        let raw = r#"{"findings":[{"primary_path":"src/foo.rs"}]}"#;
+        assert_eq!(
+            parse_impact_envelope(raw).unwrap(),
+            vec![PathBuf::from("src/foo.rs")]
+        );
+    }
+
+    #[test]
+    fn parses_impact_surface_primary_path() {
+        let raw = r#"{"findings":[{"impact_surface":{"primary_path":"src/bar.rs"}}]}"#;
+        assert_eq!(
+            parse_impact_envelope(raw).unwrap(),
+            vec![PathBuf::from("src/bar.rs")]
+        );
+    }
+
+    #[test]
+    fn parses_kind_payload_primary_path() {
+        let raw = r#"{"findings":[{"kind":{"unsafe":{"primary_path":"src/ffi.rs"}}}]}"#;
+        assert_eq!(
+            parse_impact_envelope(raw).unwrap(),
+            vec![PathBuf::from("src/ffi.rs")]
+        );
+    }
+
+    #[test]
+    fn dedupes_repeated_paths_preserving_order() {
+        let raw = r#"{"findings":[
+            {"primary_path":"a.rs"},
+            {"primary_path":"b.rs"},
+            {"primary_path":"a.rs"}
+        ]}"#;
+        assert_eq!(
+            parse_impact_envelope(raw).unwrap(),
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
+    }
+
+    #[test]
+    fn skips_findings_without_path_silently() {
+        let raw = r#"{"findings":[
+            {"primary_path":"keep.rs"},
+            {"kind":"some_other_thing","tier":"low"},
+            {"primary_path":"also_keep.rs"}
+        ]}"#;
+        assert_eq!(
+            parse_impact_envelope(raw).unwrap(),
+            vec![PathBuf::from("keep.rs"), PathBuf::from("also_keep.rs")]
+        );
+    }
+
+    #[test]
+    fn empty_envelope_returns_empty() {
+        assert!(parse_impact_envelope(r#"{}"#).unwrap().is_empty());
+        assert!(
+            parse_impact_envelope(r#"{"findings":[]}"#)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_json_errors() {
+        assert!(parse_impact_envelope("{ not json").is_err());
+    }
 }

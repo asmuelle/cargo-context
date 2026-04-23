@@ -4,12 +4,12 @@
 [![CI](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml)
 [![Release](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-blue.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0.html)
+[![MSRV](https://img.shields.io/badge/rustc-1.95%2B-blue.svg)](https://blog.rust-lang.org/category/Releases/)
 
 ## Install
 
 ```bash
-# Build from source (Rust 1.88+, edition 2024)
+# Build from source (Rust 1.95+, edition 2024)
 git clone https://github.com/asmuelle/cargo-context
 cd cargo-context
 cargo install --path crates/cargo-context-cli
@@ -555,7 +555,7 @@ The `core` crate has **zero** async runtime dependency — `tokio` lives only in
 
 ### 9.3 MSRV & Release
 
-- **MSRV:** Rust 1.88 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
+- **MSRV:** Rust 1.95 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
 - **Release:** `xtask release` cuts all four crates in lockstep with matching versions. `cargo-context-core` is semver-stable from `0.1`; binaries follow.
 
 ---

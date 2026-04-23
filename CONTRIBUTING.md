@@ -43,7 +43,7 @@ Rule of thumb: new behavior lives in `core`. The other three crates stay thin.
 ## Coding standards
 
 - **Format:** `cargo fmt` (config in `rustfmt.toml`).
-- **Lint:** `cargo clippy -- -D warnings` (config in `clippy.toml`, MSRV 1.88).
+- **Lint:** `cargo clippy -- -D warnings` (config in `clippy.toml`, MSRV 1.95).
 - **Errors:** `thiserror` in libraries, `anyhow` in binaries. No `unwrap()` / `expect()` in production paths.
 - **Public API:** doc-commented with `///`. Rustdoc is built with `-D warnings` in CI.
 - **Immutability first:** prefer new values over `&mut`; borrow by default.

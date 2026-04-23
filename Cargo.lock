@@ -169,17 +169,18 @@ dependencies = [
 
 [[package]]
 name = "cargo-context-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-context-core",
  "clap",
+ "serde_json",
  "serde_yaml",
 ]
 
 [[package]]
 name = "cargo-context-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cargo_metadata",
  "globset",
@@ -200,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-context-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-context-core",
@@ -215,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-context-scrub"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cargo-context-core",
 ]

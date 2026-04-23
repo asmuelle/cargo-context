@@ -8,16 +8,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/andreasmueller/cargo-context"
 authors = ["Andreas Mueller"]
 
 [workspace.dependencies]
-cargo-context-core = { path = "crates/cargo-context-core", version = "0.1.0" }
-cargo-context-scrub = { path = "crates/cargo-context-scrub", version = "0.1.0" }
+cargo-context-core = { path = "crates/cargo-context-core", version = "0.1.1" }
+cargo-context-scrub = { path = "crates/cargo-context-scrub", version = "0.1.1" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
