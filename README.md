@@ -1,6 +1,11 @@
 # cargo-context
 *High-Fidelity Context Engineering for Rust AI Workflows*
 
+[![CI](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-context/actions/workflows/ci.yml)
+[![Release](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-context/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rustc-1.85%2B-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
 1. **The Symptom:** What is broken? (Recent errors)
