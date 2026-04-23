@@ -10,7 +10,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/andreasmueller/cargo-context"
 authors = ["Andreas Mueller"]
@@ -31,6 +31,7 @@ syn = { version = "2", features = ["full", "visit-mut", "parsing"] }
 quote = "1"
 proc-macro2 = "1"
 prettyplease = "0.2"
+tiktoken-rs = "0.6"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
 tracing = "0.1"

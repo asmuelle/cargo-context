@@ -20,6 +20,7 @@ syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
 prettyplease = { workspace = true }
+tiktoken-rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -473,7 +473,7 @@ The `core` crate has **zero** async runtime dependency — `tokio` lives only in
 
 ### 9.3 MSRV & Release
 
-- **MSRV:** Rust 1.75 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
+- **MSRV:** Rust 1.85 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
 - **Release:** `xtask release` cuts all four crates in lockstep with matching versions. `cargo-context-core` is semver-stable from `0.1`; binaries follow.
 
 ---

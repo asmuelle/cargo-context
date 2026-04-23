@@ -1,0 +1,42 @@
+{
+  "enabledPlugins": {
+    "ecc@ecc": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/qa/pre_write_guard.sh",
+            "statusMessage": "Guarding oversized writes (>800 lines)"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "POST_EDIT_CLIPPY=1 bash scripts/qa/post_edit.sh \"$FILE_PATH\"",
+            "statusMessage": "Per-edit QA (rustfmt, per-crate cargo clippy, file lengths)"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "QA_SKIP_WASM=1 QA_USE_NEXTEST=1 bash scripts/qa/run_local_qa.sh",
+            "statusMessage": "Session-end QA: fmt, structure, clippy, cargo-deny, check, nextest+doctests"
+          }
+        ]
+      }
+    ]
+  }
+}

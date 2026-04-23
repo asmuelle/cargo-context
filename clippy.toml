@@ -1,4 +1,4 @@
-msrv = "1.75"
+msrv = "1.85"
 
 # Keep signatures simple. Flag helpers that grow too many knobs.
 too-many-arguments-threshold = 7
