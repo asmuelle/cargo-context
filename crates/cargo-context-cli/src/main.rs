@@ -7,7 +7,9 @@
 use std::io::{IsTerminal, Read};
 
 use anyhow::{bail, Result};
-use cargo_context_core::{Budget, BudgetStrategy, Format, PackBuilder, Preset, Tokenizer};
+use cargo_context_core::{
+    Budget, BudgetStrategy, ExpandMode, Format, PackBuilder, Preset, Tokenizer,
+};
 use clap::{Parser, ValueEnum};
 
 /// High-fidelity context engineering for Rust AI workflows.
@@ -45,6 +47,10 @@ struct Args {
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = FormatArg::Markdown)]
     format: FormatArg,
+
+    /// Expand proc macros via `cargo expand` (requires cargo-expand installed).
+    #[arg(long, value_enum, default_value_t = ExpandModeArg::Off)]
+    expand_macros: ExpandModeArg,
 
     /// Disable secret scrubbing. Requires --i-know-what-im-doing.
     #[arg(long)]
@@ -120,6 +126,23 @@ impl From<TokenizerArg> for Tokenizer {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExpandModeArg {
+    Off,
+    Auto,
+    On,
+}
+
+impl From<ExpandModeArg> for ExpandMode {
+    fn from(m: ExpandModeArg) -> Self {
+        match m {
+            ExpandModeArg::Off => ExpandMode::Off,
+            ExpandModeArg::Auto => ExpandMode::Auto,
+            ExpandModeArg::On => ExpandMode::On,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum FormatArg {
     Markdown,
     Xml,
@@ -175,6 +198,7 @@ fn main() -> Result<()> {
         .budget(budget)
         .tokenizer(args.tokenizer.into())
         .scrub(scrub)
+        .expand_mode(args.expand_macros.into())
         .project_root(std::env::current_dir()?);
 
     for p in args.include_paths {

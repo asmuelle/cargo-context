@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::budget::{self, Budget, Priority, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS};
 use crate::collect::{self, Diagnostics, Diff, EntryPoints, RelatedTests, WorkspaceMap};
 use crate::error::Result;
+use crate::expand::{self, ExpandMode};
 use crate::scrub::Scrubber;
 use crate::tokenize::Tokenizer;
 
@@ -107,6 +108,7 @@ pub struct PackBuilder {
     budget: Budget,
     tokenizer: Tokenizer,
     scrub: bool,
+    expand_mode: ExpandMode,
     include_paths: Vec<String>,
     exclude_paths: Vec<String>,
     project_root: Option<std::path::PathBuf>,
@@ -120,6 +122,7 @@ impl Default for PackBuilder {
             budget: Budget::default(),
             tokenizer: Tokenizer::Llama3,
             scrub: true,
+            expand_mode: ExpandMode::default(),
             include_paths: Vec::new(),
             exclude_paths: Vec::new(),
             project_root: None,
@@ -155,6 +158,10 @@ impl PackBuilder {
     }
     pub fn scrub(mut self, on: bool) -> Self {
         self.scrub = on;
+        self
+    }
+    pub fn expand_mode(mut self, m: ExpandMode) -> Self {
+        self.expand_mode = m;
         self
     }
     pub fn include_path(mut self, path: impl Into<String>) -> Self {
@@ -201,8 +208,21 @@ impl PackBuilder {
 
         let wants = SectionWants::for_preset(self.preset);
 
-        if wants.errors {
-            if let Some(content) = try_collect_errors(&root) {
+        // Collect diagnostics as structured data so the diff renderer can
+        // prioritize files with primary error spans.
+        let diagnostics = if wants.errors {
+            collect::last_error(&root).ok()
+        } else {
+            None
+        };
+        let error_files: Vec<std::path::PathBuf> = diagnostics
+            .as_ref()
+            .map(|d| d.referenced_files())
+            .unwrap_or_default();
+
+        if let Some(d) = diagnostics.as_ref() {
+            if !d.is_empty() {
+                let content = render_diagnostics(d);
                 candidates.push((
                     P_ERROR,
                     mk_section("🚨 Current State (Errors)", &content, self.tokenizer),
@@ -222,7 +242,11 @@ impl PackBuilder {
                 if !d.is_empty() {
                     candidates.push((
                         P_DIFF,
-                        mk_section("⚡ Intent (Git Diff)", &render_diff(d), self.tokenizer),
+                        mk_section(
+                            "⚡ Intent (Git Diff)",
+                            &render_diff_ordered(d, &error_files),
+                            self.tokenizer,
+                        ),
                     ));
                 }
             }
@@ -255,6 +279,14 @@ impl PackBuilder {
                         ));
                     }
                 }
+            }
+        }
+        if self.expand_mode != ExpandMode::Off {
+            if let Some(content) = try_collect_expansion(&root, self.expand_mode, diff.as_ref()) {
+                candidates.push((
+                    P_ENTRY,
+                    mk_section("🔍 Expanded Macros", &content, self.tokenizer),
+                ));
             }
         }
 
@@ -321,21 +353,73 @@ fn try_collect_map(root: &Path) -> Option<String> {
     collect::cargo_metadata(root).ok().map(render_map)
 }
 
+fn try_collect_expansion(root: &Path, mode: ExpandMode, diff: Option<&Diff>) -> Option<String> {
+    if matches!(mode, ExpandMode::Off) {
+        return None;
+    }
+    if !expand::expand_available() {
+        return None;
+    }
+    let meta = collect::cargo_metadata(root).ok()?;
+
+    // Auto mode: only expand when the diff touches a file with proc-macro
+    // attributes. For the initial pass, treat any diff with .rs files as
+    // meeting the threshold; a smarter heuristic can come later.
+    if matches!(mode, ExpandMode::Auto) {
+        let has_rust = diff
+            .map(|d| {
+                d.files
+                    .iter()
+                    .any(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rs"))
+            })
+            .unwrap_or(false);
+        if !has_rust {
+            return None;
+        }
+    }
+
+    let mut out = String::new();
+    let mut expanded_any = false;
+    for member in &meta.members {
+        let dir = match member.manifest_path.parent() {
+            Some(d) => d,
+            None => continue,
+        };
+        let lib = dir.join("src/lib.rs");
+        let main = dir.join("src/main.rs");
+        let target = if lib.exists() {
+            lib
+        } else if main.exists() {
+            main
+        } else {
+            continue;
+        };
+        match expand::expand_file(&meta.workspace_root, &member.name, &target) {
+            Ok(Some(text)) => {
+                out.push_str(&format!(
+                    "### `{}` — {} (expanded)\n```rust\n{}\n```\n\n",
+                    target.display(),
+                    member.name,
+                    text.trim_end()
+                ));
+                expanded_any = true;
+            }
+            Ok(None) | Err(_) => continue,
+        }
+    }
+    if expanded_any {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 fn try_collect_tests(root: &Path, changed: &[std::path::PathBuf]) -> Option<String> {
     let rt = collect::related_tests(root, changed).ok()?;
     if rt.is_empty() {
         None
     } else {
         Some(render_tests(&rt))
-    }
-}
-
-fn try_collect_errors(root: &Path) -> Option<String> {
-    let d = collect::last_error(root).ok()?;
-    if d.is_empty() {
-        None
-    } else {
-        Some(render_diagnostics(&d))
     }
 }
 
@@ -431,12 +515,49 @@ fn render_map(m: WorkspaceMap) -> String {
     out
 }
 
-fn render_diff(d: &Diff) -> String {
+/// Render a diff with files containing primary error spans ordered first.
+/// Under budget pressure, earlier sections survive truncation, so this
+/// keeps the most signal-dense files when the budget forces a cut.
+fn render_diff_ordered(d: &Diff, error_files: &[std::path::PathBuf]) -> String {
+    let error_set: std::collections::HashSet<&Path> =
+        error_files.iter().map(|p| p.as_path()).collect();
+
+    let mut files: Vec<&collect::FileDiff> = d.files.iter().collect();
+    files.sort_by_key(|f| {
+        // Files with errors first (0), then by alphabetical path.
+        let has_error = error_set.contains(f.path.as_path())
+            || error_files.iter().any(|e| path_matches_suffix(&f.path, e));
+        (!has_error, f.path.to_string_lossy().into_owned())
+    });
+
+    let errored_count = files
+        .iter()
+        .filter(|f| {
+            error_set.contains(f.path.as_path())
+                || error_files.iter().any(|e| path_matches_suffix(&f.path, e))
+        })
+        .count();
+
     let mut out = String::new();
-    out.push_str(&format!("{} file(s) changed.\n\n", d.files.len()));
-    for f in &d.files {
+    if errored_count > 0 {
+        out.push_str(&format!(
+            "{} file(s) changed; {} touched by compiler errors (shown first).\n\n",
+            d.files.len(),
+            errored_count
+        ));
+    } else {
+        out.push_str(&format!("{} file(s) changed.\n\n", d.files.len()));
+    }
+    for f in files {
         let status = format!("{:?}", f.status).to_lowercase();
-        out.push_str(&format!("### `{}` — {status}\n", f.path.display()));
+        let marker = if error_set.contains(f.path.as_path())
+            || error_files.iter().any(|e| path_matches_suffix(&f.path, e))
+        {
+            " ⚠"
+        } else {
+            ""
+        };
+        out.push_str(&format!("### `{}` — {status}{marker}\n", f.path.display()));
         if let Some(old) = &f.old_path {
             out.push_str(&format!("- Renamed from `{}`\n", old.display()));
         }
@@ -449,6 +570,15 @@ fn render_diff(d: &Diff) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Compiler diagnostics and git diff often use different path anchors
+/// (relative to the crate vs. relative to the workspace). Matching by
+/// suffix is a pragmatic bridge.
+fn path_matches_suffix(haystack: &Path, needle: &Path) -> bool {
+    let h = haystack.to_string_lossy();
+    let n = needle.to_string_lossy();
+    h.ends_with(n.as_ref()) || n.ends_with(h.as_ref())
 }
 
 fn render_diagnostics(d: &Diagnostics) -> String {
@@ -535,5 +665,78 @@ mod tests {
             .unwrap();
         let s = pack.render_json().unwrap();
         let _: Pack = serde_json::from_str(&s).unwrap();
+    }
+
+    #[test]
+    fn render_diff_puts_error_files_first() {
+        use crate::collect::{Diff, FileDiff, FileStatus};
+        let d = Diff {
+            range: None,
+            files: vec![
+                FileDiff {
+                    path: std::path::PathBuf::from("src/unrelated.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+                FileDiff {
+                    path: std::path::PathBuf::from("src/broken.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+                FileDiff {
+                    path: std::path::PathBuf::from("src/also_clean.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+            ],
+        };
+        let errors = vec![std::path::PathBuf::from("src/broken.rs")];
+        let rendered = render_diff_ordered(&d, &errors);
+        // The broken file should render before the unrelated ones.
+        let broken_pos = rendered.find("broken.rs").unwrap();
+        let unrelated_pos = rendered.find("unrelated.rs").unwrap();
+        let clean_pos = rendered.find("also_clean.rs").unwrap();
+        assert!(
+            broken_pos < unrelated_pos && broken_pos < clean_pos,
+            "error-touched file should render first; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains('⚠'),
+            "expected warning marker on errored file"
+        );
+    }
+
+    #[test]
+    fn render_diff_no_errors_falls_back_to_alpha_order() {
+        use crate::collect::{Diff, FileDiff, FileStatus};
+        let d = Diff {
+            range: None,
+            files: vec![
+                FileDiff {
+                    path: std::path::PathBuf::from("b.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+                FileDiff {
+                    path: std::path::PathBuf::from("a.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+            ],
+        };
+        let rendered = render_diff_ordered(&d, &[]);
+        assert!(rendered.find("a.rs").unwrap() < rendered.find("b.rs").unwrap());
+        // No warning marker when no errors are present.
+        assert!(!rendered.contains('⚠'));
     }
 }

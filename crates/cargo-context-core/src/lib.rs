@@ -17,5 +17,6 @@ pub mod tokenize;
 
 pub use budget::{Budget, BudgetStrategy};
 pub use error::{Error, Result};
+pub use expand::ExpandMode;
 pub use pack::{Format, Pack, PackBuilder, Preset, Section};
 pub use tokenize::Tokenizer;
