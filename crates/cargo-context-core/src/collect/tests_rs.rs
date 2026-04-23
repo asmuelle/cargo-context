@@ -101,37 +101,37 @@ pub fn related_tests(root: &Path, changed_paths: &[PathBuf]) -> Result<RelatedTe
 
         // Integration tests in <crate>/tests/.
         let tests_dir = manifest_dir.join("tests");
-        if tests_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&tests_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                        continue;
-                    }
-                    let source = match std::fs::read_to_string(&path) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    let matched = stems
-                        .iter()
-                        .filter(|stem| contains_stem(&source, stem))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if matched.is_empty() {
-                        continue;
-                    }
-                    let functions = test_functions(&source);
-                    if functions.is_empty() {
-                        continue;
-                    }
-                    files.push(TestFile {
-                        path,
-                        crate_name: member.name.clone(),
-                        kind: TestKind::Integration,
-                        functions,
-                        matched_stems: matched,
-                    });
+        if tests_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&tests_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
                 }
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let matched = stems
+                    .iter()
+                    .filter(|stem| contains_stem(&source, stem))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matched.is_empty() {
+                    continue;
+                }
+                let functions = test_functions(&source);
+                if functions.is_empty() {
+                    continue;
+                }
+                files.push(TestFile {
+                    path,
+                    crate_name: member.name.clone(),
+                    kind: TestKind::Integration,
+                    functions,
+                    matched_stems: matched,
+                });
             }
         }
 
@@ -233,12 +233,11 @@ fn inline_test_functions(source: &str) -> Vec<TestFunction> {
     };
     let mut out = Vec::new();
     for item in &file.items {
-        if let syn::Item::Mod(m) = item {
-            if has_cfg_test(&m.attrs) {
-                if let Some((_, items)) = &m.content {
-                    out.extend(collect_test_fns(items));
-                }
-            }
+        if let syn::Item::Mod(m) = item
+            && has_cfg_test(&m.attrs)
+            && let Some((_, items)) = &m.content
+        {
+            out.extend(collect_test_fns(items));
         }
     }
     out

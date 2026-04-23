@@ -231,14 +231,14 @@ impl PackBuilder {
             .map(|d| d.referenced_files())
             .unwrap_or_default();
 
-        if let Some(d) = diagnostics.as_ref() {
-            if !d.is_empty() {
-                let content = render_diagnostics(d);
-                candidates.push((
-                    P_ERROR,
-                    mk_section("🚨 Current State (Errors)", &content, &self.tokenizer),
-                ));
-            }
+        if let Some(d) = diagnostics.as_ref()
+            && !d.is_empty()
+        {
+            let content = render_diagnostics(d);
+            candidates.push((
+                P_ERROR,
+                mk_section("🚨 Current State (Errors)", &content, &self.tokenizer),
+            ));
         }
 
         // Collect the diff once; share its paths with the tests collector.
@@ -248,57 +248,54 @@ impl PackBuilder {
             None
         };
 
-        if wants.diff {
-            if let Some(d) = diff.as_ref() {
-                if !d.is_empty() {
-                    candidates.push((
-                        P_DIFF,
-                        mk_section(
-                            "⚡ Intent (Git Diff)",
-                            &render_diff_ordered(d, &error_files, &scrubber),
-                            &self.tokenizer,
-                        ),
-                    ));
-                }
-            }
+        if wants.diff
+            && let Some(d) = diff.as_ref()
+            && !d.is_empty()
+        {
+            candidates.push((
+                P_DIFF,
+                mk_section(
+                    "⚡ Intent (Git Diff)",
+                    &render_diff_ordered(d, &error_files, &scrubber),
+                    &self.tokenizer,
+                ),
+            ));
         }
-        if wants.map {
-            if let Some(content) = try_collect_map(&root) {
+        if wants.map
+            && let Some(content) = try_collect_map(&root)
+        {
+            candidates.push((
+                P_MAP,
+                mk_section("🗺️ Project Map", &content, &self.tokenizer),
+            ));
+        }
+        if wants.entry
+            && let Some(content) = try_collect_entry(&root)
+        {
+            candidates.push((
+                P_ENTRY,
+                mk_section("🧭 Entry Points", &content, &self.tokenizer),
+            ));
+        }
+        if wants.tests
+            && let Some(d) = diff.as_ref()
+            && !d.is_empty()
+        {
+            let changed: Vec<std::path::PathBuf> = d.files.iter().map(|f| f.path.clone()).collect();
+            if let Some(content) = try_collect_tests(&root, &changed) {
                 candidates.push((
-                    P_MAP,
-                    mk_section("🗺️ Project Map", &content, &self.tokenizer),
+                    P_TESTS,
+                    mk_section("🎯 Related Tests", &content, &self.tokenizer),
                 ));
             }
         }
-        if wants.entry {
-            if let Some(content) = try_collect_entry(&root) {
-                candidates.push((
-                    P_ENTRY,
-                    mk_section("🧭 Entry Points", &content, &self.tokenizer),
-                ));
-            }
-        }
-        if wants.tests {
-            if let Some(d) = diff.as_ref() {
-                if !d.is_empty() {
-                    let changed: Vec<std::path::PathBuf> =
-                        d.files.iter().map(|f| f.path.clone()).collect();
-                    if let Some(content) = try_collect_tests(&root, &changed) {
-                        candidates.push((
-                            P_TESTS,
-                            mk_section("🎯 Related Tests", &content, &self.tokenizer),
-                        ));
-                    }
-                }
-            }
-        }
-        if self.expand_mode != ExpandMode::Off {
-            if let Some(content) = try_collect_expansion(&root, self.expand_mode, diff.as_ref()) {
-                candidates.push((
-                    P_ENTRY,
-                    mk_section("🔍 Expanded Macros", &content, &self.tokenizer),
-                ));
-            }
+        if self.expand_mode != ExpandMode::Off
+            && let Some(content) = try_collect_expansion(&root, self.expand_mode, diff.as_ref())
+        {
+            candidates.push((
+                P_ENTRY,
+                mk_section("🔍 Expanded Macros", &content, &self.tokenizer),
+            ));
         }
 
         let mut scrub_report = crate::scrub::ScrubReport::default();
@@ -641,15 +638,15 @@ fn render_diagnostics(d: &Diagnostics) -> String {
             "- **{:?}** {}: {}\n",
             diag.level, code, diag.message
         ));
-        if let Some(file) = diag.primary_file() {
-            if let Some(span) = diag.spans.iter().find(|s| s.is_primary) {
-                out.push_str(&format!(
-                    "  at `{}:{}:{}`\n",
-                    file.display(),
-                    span.line_start,
-                    span.col_start
-                ));
-            }
+        if let Some(file) = diag.primary_file()
+            && let Some(span) = diag.spans.iter().find(|s| s.is_primary)
+        {
+            out.push_str(&format!(
+                "  at `{}:{}:{}`\n",
+                file.display(),
+                span.line_start,
+                span.col_start
+            ));
         }
     }
     out

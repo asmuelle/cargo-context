@@ -333,10 +333,10 @@ impl Scrubber {
 fn append_log_lines(path: &Path, redactions: &[Redaction]) -> Result<()> {
     use std::io::Write;
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     let mut file = std::fs::OpenOptions::new()
