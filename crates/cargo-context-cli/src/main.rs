@@ -5,6 +5,7 @@
 //! name ("context") as `argv\[1\]`; we strip it so clap sees clean args.
 
 use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use cargo_context_core::{
@@ -43,6 +44,12 @@ struct Args {
     /// Tokenizer to use for counting.
     #[arg(long, value_enum, default_value_t = TokenizerArg::Llama3)]
     tokenizer: TokenizerArg,
+
+    /// Path to a HuggingFace `tokenizer.json` for exact counting (overrides
+    /// --tokenizer). Works with any HF-format vocab — Llama3, Mistral,
+    /// Qwen, etc. The file is loaded once and cached per path.
+    #[arg(long, value_name = "PATH")]
+    hf_llama3_vocab: Option<PathBuf>,
 
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = FormatArg::Markdown)]
@@ -201,10 +208,15 @@ fn main() -> Result<()> {
         strategy: args.budget_strategy.into(),
     };
 
+    let tokenizer: Tokenizer = match args.hf_llama3_vocab {
+        Some(path) => Tokenizer::HfLlama3 { vocab_path: path },
+        None => args.tokenizer.into(),
+    };
+
     let mut builder = PackBuilder::new()
         .preset(preset)
         .budget(budget)
-        .tokenizer(args.tokenizer.into())
+        .tokenizer(tokenizer)
         .scrub(scrub)
         .expand_mode(args.expand_macros.into())
         .project_root(std::env::current_dir()?);

@@ -73,7 +73,7 @@ pub struct Allocation {
 pub fn allocate(
     candidates: Vec<(Priority, Section)>,
     budget: &Budget,
-    tokenizer: Tokenizer,
+    tokenizer: &Tokenizer,
 ) -> Allocation {
     let limit = budget.effective();
     match budget.strategy {
@@ -124,7 +124,7 @@ fn apply_priority(candidates: Vec<(Priority, Section)>, limit: usize) -> Allocat
 fn apply_truncate(
     candidates: Vec<(Priority, Section)>,
     limit: usize,
-    tokenizer: Tokenizer,
+    tokenizer: &Tokenizer,
 ) -> Allocation {
     let (exempt, mut competing): (Vec<Section>, Vec<(Priority, Section)>) =
         candidates.into_iter().partition_map(|(p, s)| {
@@ -256,7 +256,7 @@ mod tests {
             reserve_tokens: 0,
             strategy: BudgetStrategy::Priority,
         };
-        let a = allocate(candidates, &b, Tokenizer::CharsDiv4);
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
         assert_eq!(a.kept.len(), 2);
         assert_eq!(a.kept[0].name, "errors");
         assert_eq!(a.kept[1].name, "diff");
@@ -275,7 +275,7 @@ mod tests {
             reserve_tokens: 0,
             strategy: BudgetStrategy::Priority,
         };
-        let a = allocate(candidates, &b, Tokenizer::CharsDiv4);
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
         assert!(a.kept.iter().any(|s| s.name.contains("Prompt")));
         assert_eq!(a.dropped, vec!["errors"]);
     }
@@ -288,7 +288,7 @@ mod tests {
             reserve_tokens: 0,
             strategy: BudgetStrategy::Truncate,
         };
-        let a = allocate(candidates, &b, Tokenizer::CharsDiv4);
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
         assert_eq!(a.kept.len(), 2);
         assert_eq!(a.kept[0].name, "errors");
         assert_eq!(a.kept[1].name, "diff");
@@ -309,7 +309,7 @@ mod tests {
             reserve_tokens: 0,
             strategy: BudgetStrategy::Priority,
         };
-        let a = allocate(candidates, &b, Tokenizer::CharsDiv4);
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
         assert_eq!(a.kept.len(), 1);
         assert_eq!(a.kept[0].name, "📝 User Prompt");
         assert_eq!(a.dropped, vec!["errors", "diff"]);
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn empty_candidates_produce_empty_allocation() {
-        let a = allocate(Vec::new(), &Budget::default(), Tokenizer::CharsDiv4);
+        let a = allocate(Vec::new(), &Budget::default(), &Tokenizer::CharsDiv4);
         assert!(a.kept.is_empty());
         assert!(a.dropped.is_empty());
         assert_eq!(a.tokens_used, 0);

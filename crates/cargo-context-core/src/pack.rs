@@ -204,7 +204,7 @@ impl PackBuilder {
         if let Some(prompt) = &self.stdin_prompt {
             candidates.push((
                 P_EXEMPT,
-                mk_section("📝 User Prompt", prompt, self.tokenizer),
+                mk_section("📝 User Prompt", prompt, &self.tokenizer),
             ));
         }
 
@@ -227,7 +227,7 @@ impl PackBuilder {
                 let content = render_diagnostics(d);
                 candidates.push((
                     P_ERROR,
-                    mk_section("🚨 Current State (Errors)", &content, self.tokenizer),
+                    mk_section("🚨 Current State (Errors)", &content, &self.tokenizer),
                 ));
             }
         }
@@ -247,7 +247,7 @@ impl PackBuilder {
                         mk_section(
                             "⚡ Intent (Git Diff)",
                             &render_diff_ordered(d, &error_files),
-                            self.tokenizer,
+                            &self.tokenizer,
                         ),
                     ));
                 }
@@ -257,7 +257,7 @@ impl PackBuilder {
             if let Some(content) = try_collect_map(&root) {
                 candidates.push((
                     P_MAP,
-                    mk_section("🗺️ Project Map", &content, self.tokenizer),
+                    mk_section("🗺️ Project Map", &content, &self.tokenizer),
                 ));
             }
         }
@@ -265,7 +265,7 @@ impl PackBuilder {
             if let Some(content) = try_collect_entry(&root) {
                 candidates.push((
                     P_ENTRY,
-                    mk_section("🧭 Entry Points", &content, self.tokenizer),
+                    mk_section("🧭 Entry Points", &content, &self.tokenizer),
                 ));
             }
         }
@@ -277,7 +277,7 @@ impl PackBuilder {
                     if let Some(content) = try_collect_tests(&root, &changed) {
                         candidates.push((
                             P_TESTS,
-                            mk_section("🎯 Related Tests", &content, self.tokenizer),
+                            mk_section("🎯 Related Tests", &content, &self.tokenizer),
                         ));
                     }
                 }
@@ -287,7 +287,7 @@ impl PackBuilder {
             if let Some(content) = try_collect_expansion(&root, self.expand_mode, diff.as_ref()) {
                 candidates.push((
                     P_ENTRY,
-                    mk_section("🔍 Expanded Macros", &content, self.tokenizer),
+                    mk_section("🔍 Expanded Macros", &content, &self.tokenizer),
                 ));
             }
         }
@@ -303,7 +303,7 @@ impl PackBuilder {
             }
         }
 
-        let alloc = budget::allocate(candidates, &self.budget, self.tokenizer);
+        let alloc = budget::allocate(candidates, &self.budget, &self.tokenizer);
 
         Ok(Pack {
             schema: "cargo-context/v1".into(),
@@ -620,7 +620,7 @@ fn render_diagnostics(d: &Diagnostics) -> String {
     out
 }
 
-fn mk_section(name: &str, content: &str, tokenizer: Tokenizer) -> Section {
+fn mk_section(name: &str, content: &str, tokenizer: &Tokenizer) -> Section {
     Section {
         name: name.into(),
         content: content.into(),

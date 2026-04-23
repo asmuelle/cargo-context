@@ -1,10 +1,10 @@
 //! Path-based redaction rules.
 //!
-//! Files whose paths match [`redact_whole`] are replaced with a single
-//! `[REDACTED FILE: <path>]` marker when fed through
-//! [`crate::scrub::Scrubber::scrub_file`]. Paths matching [`exclude`]
-//! bypass *all* scrubbing — useful for test fixtures containing public
-//! sample keys.
+//! Files whose paths match the `redact_whole` globs are replaced with a
+//! single `\[REDACTED FILE: <path>\]` marker when fed through
+//! [`crate::scrub::Scrubber::scrub_file`]. Paths matching the `exclude`
+//! globs bypass *all* scrubbing — useful for test fixtures containing
+//! public sample keys.
 
 use std::path::Path;
 
