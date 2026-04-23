@@ -59,6 +59,14 @@ struct Args {
     #[arg(long, hide = true)]
     i_know_what_im_doing: bool,
 
+    /// Print a per-category summary of scrub redactions to stderr.
+    #[arg(long)]
+    scrub_report: bool,
+
+    /// Exit non-zero if any redaction occurred (CI-friendly).
+    #[arg(long)]
+    strict_scrub: bool,
+
     /// Additional paths to include (glob allowed).
     #[arg(long = "include-path")]
     include_paths: Vec<String>,
@@ -220,7 +228,20 @@ fn main() -> Result<()> {
     }
 
     let pack = builder.build()?;
+
+    if args.scrub_report {
+        eprintln!("[scrub] {}", pack.scrub.summary());
+    }
+
     let rendered = pack.render(args.format.into())?;
     print!("{rendered}");
+
+    if args.strict_scrub && !pack.scrub.is_empty() {
+        eprintln!(
+            "[scrub] --strict-scrub: {} redaction(s) occurred, exiting 2",
+            pack.scrub.redactions.len()
+        );
+        std::process::exit(2);
+    }
     Ok(())
 }

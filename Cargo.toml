@@ -32,6 +32,7 @@ quote = "1"
 proc-macro2 = "1"
 prettyplease = "0.2"
 tiktoken-rs = "0.6"
+globset = "0.4"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
 tracing = "0.1"

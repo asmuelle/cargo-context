@@ -71,10 +71,11 @@ pub fn related_tests(root: &Path, changed_paths: &[PathBuf]) -> Result<RelatedTe
         return Ok(RelatedTests::default());
     }
 
+    // Stems are only used to match *integration* tests by string-search.
+    // Inline tests are scanned via full path, so don't early-exit on empty
+    // stems — a diff touching only `mod.rs`/`lib.rs` files still produces
+    // valid inline-test matches.
     let stems = path_stems(changed_paths);
-    if stems.is_empty() {
-        return Ok(RelatedTests::default());
-    }
 
     let meta = cargo_metadata(root)?;
     let mut files: Vec<TestFile> = Vec::new();
@@ -383,9 +384,9 @@ mod tests {
 
     #[test]
     fn related_tests_matches_inline_tests_in_changed_file() {
-        // Our own scrub.rs has an inline `#[cfg(test)] mod tests` block.
+        // Our own scrub/mod.rs has an inline `#[cfg(test)] mod tests` block.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let changed = vec![PathBuf::from("crates/cargo-context-core/src/scrub.rs")];
+        let changed = vec![PathBuf::from("crates/cargo-context-core/src/scrub/mod.rs")];
         let out = related_tests(root, &changed).unwrap();
         assert!(
             out.files

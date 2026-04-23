@@ -43,6 +43,8 @@ pub struct Pack {
     pub tokens_budget: usize,
     pub tokenizer: String,
     pub dropped: Vec<String>,
+    #[serde(default)]
+    pub scrub: crate::scrub::ScrubReport,
 }
 
 impl Pack {
@@ -290,11 +292,14 @@ impl PackBuilder {
             }
         }
 
+        let mut scrub_report = crate::scrub::ScrubReport::default();
         if self.scrub {
-            let scrubber = Scrubber::with_builtins()?;
+            let scrubber = Scrubber::with_workspace(&root)?;
             for (_, s) in candidates.iter_mut() {
-                s.content = scrubber.scrub(&s.content);
+                let (scrubbed, report) = scrubber.scrub_with_report(&s.content);
+                s.content = scrubbed;
                 s.token_estimate = self.tokenizer.count(&s.content);
+                scrub_report.redactions.extend(report.redactions);
             }
         }
 
@@ -308,6 +313,7 @@ impl PackBuilder {
             tokens_budget: alloc.tokens_budget,
             tokenizer: self.tokenizer.label().into(),
             dropped: alloc.dropped,
+            scrub: scrub_report,
         })
     }
 }
