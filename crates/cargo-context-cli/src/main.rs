@@ -86,6 +86,17 @@ struct Args {
     /// Paths to exclude (glob allowed).
     #[arg(long = "exclude-path")]
     exclude_paths: Vec<String>,
+
+    /// Read repo-relative file paths (one per line) and embed their full
+    /// contents in a "📂 Scoped Files" section. Pass `-` to read from
+    /// stdin (mutually exclusive with the stdin-prompt path). Lines
+    /// starting with `#` are treated as comments.
+    ///
+    /// Designed for `cargo impact --context | cargo context --files-from -`:
+    /// the upstream tool tells us which files matter, we embed them
+    /// verbatim (subject to scrubbing and budget).
+    #[arg(long, value_name = "PATH")]
+    files_from: Option<String>,
 }
 
 /// Subcommands. When none is given, the default flow builds a context pack.
@@ -245,13 +256,32 @@ fn main() -> Result<()> {
         None => args.tokenizer.into(),
     };
 
+    // `--files-from -` claims stdin for the file list and rules out the
+    // stdin-prompt path. Resolve before the prompt block so we don't
+    // double-consume the stream.
+    let files_from_uses_stdin = args.files_from.as_deref() == Some("-");
+    let files_from_paths: Vec<PathBuf> = match args.files_from.as_deref() {
+        None => Vec::new(),
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::stdin().lock().read_to_string(&mut buf)?;
+            parse_files_list(&buf)
+        }
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("failed to read --files-from {path}: {e}"))?;
+            parse_files_list(&raw)
+        }
+    };
+
     let mut builder = PackBuilder::new()
         .preset(preset)
         .budget(budget)
         .tokenizer(tokenizer)
         .scrub(scrub)
         .expand_mode(args.expand_macros.into())
-        .project_root(std::env::current_dir()?);
+        .project_root(std::env::current_dir()?)
+        .files_from(files_from_paths);
 
     for p in args.include_paths {
         builder = builder.include_path(p);
@@ -260,14 +290,17 @@ fn main() -> Result<()> {
         builder = builder.exclude_path(p);
     }
 
-    // Forward piped stdin as the user prompt.
-    let stdin = std::io::stdin();
-    if !stdin.is_terminal() {
-        let mut buf = String::new();
-        stdin.lock().read_to_string(&mut buf)?;
-        let trimmed = buf.trim();
-        if !trimmed.is_empty() {
-            builder = builder.stdin_prompt(trimmed.to_string());
+    // Forward piped stdin as the user prompt — unless --files-from -
+    // already consumed it.
+    if !files_from_uses_stdin {
+        let stdin = std::io::stdin();
+        if !stdin.is_terminal() {
+            let mut buf = String::new();
+            stdin.lock().read_to_string(&mut buf)?;
+            let trimmed = buf.trim();
+            if !trimmed.is_empty() {
+                builder = builder.stdin_prompt(trimmed.to_string());
+            }
         }
     }
 
@@ -288,6 +321,17 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+/// Parse a newline-delimited file list. Trims each line, drops blanks and
+/// `#`-prefixed comment lines. Used for both `--files-from <path>` and
+/// `--files-from -` (stdin).
+fn parse_files_list(raw: &str) -> Vec<PathBuf> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Implements `cargo-context scrub --check`: parse the YAML config and print

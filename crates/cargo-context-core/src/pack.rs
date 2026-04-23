@@ -115,6 +115,7 @@ pub struct PackBuilder {
     exclude_paths: Vec<String>,
     project_root: Option<std::path::PathBuf>,
     stdin_prompt: Option<String>,
+    files_from: Vec<std::path::PathBuf>,
 }
 
 impl Default for PackBuilder {
@@ -129,6 +130,7 @@ impl Default for PackBuilder {
             exclude_paths: Vec::new(),
             project_root: None,
             stdin_prompt: None,
+            files_from: Vec::new(),
         }
     }
 }
@@ -180,6 +182,20 @@ impl PackBuilder {
     }
     pub fn stdin_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.stdin_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Repo-relative paths whose full contents should be embedded in a
+    /// dedicated "📂 Scoped Files" section. Designed for the
+    /// `cargo impact --context | cargo context --files-from -` workflow:
+    /// the upstream tool tells us which files matter, and we include them
+    /// verbatim (subject to scrubbing and budget).
+    ///
+    /// These paths also join the diff-changed set when the related-tests
+    /// collector runs, so a test that references a scoped file by stem
+    /// gets surfaced even when the scoped file isn't in `git diff`.
+    pub fn files_from(mut self, paths: Vec<std::path::PathBuf>) -> Self {
+        self.files_from = paths;
         self
     }
 
@@ -277,12 +293,29 @@ impl PackBuilder {
                 mk_section("🧭 Entry Points", &content, &self.tokenizer),
             ));
         }
-        if wants.tests
-            && let Some(d) = diff.as_ref()
-            && !d.is_empty()
+        // Scoped files from `--files-from` (e.g. `cargo impact --context`).
+        // Slotted at the diff priority: these are explicit "here is what
+        // matters" signals and deserve to survive budget pressure on par
+        // with the actual diff.
+        if !self.files_from.is_empty()
+            && let Some(content) = try_collect_scoped(&root, &self.files_from, &scrubber)
         {
-            let changed: Vec<std::path::PathBuf> = d.files.iter().map(|f| f.path.clone()).collect();
-            if let Some(content) = try_collect_tests(&root, &changed) {
+            candidates.push((
+                P_DIFF,
+                mk_section("📂 Scoped Files", &content, &self.tokenizer),
+            ));
+        }
+
+        if wants.tests {
+            // Union of diff-changed and files-from for related-tests linkage.
+            let mut changed: Vec<std::path::PathBuf> = diff
+                .as_ref()
+                .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
+                .unwrap_or_default();
+            changed.extend(self.files_from.iter().cloned());
+            if !changed.is_empty()
+                && let Some(content) = try_collect_tests(&root, &changed)
+            {
                 candidates.push((
                     P_TESTS,
                     mk_section("🎯 Related Tests", &content, &self.tokenizer),
@@ -421,6 +454,75 @@ fn try_collect_expansion(root: &Path, mode: ExpandMode, diff: Option<&Diff>) -> 
         }
     }
     if expanded_any { Some(out) } else { None }
+}
+
+/// Read each repo-relative path under `root`, scrub it, and emit a fenced
+/// block with a sensible language hint. Missing paths and directories are
+/// silently skipped so that an upstream tool emitting a stale path list
+/// doesn't break pack generation.
+fn try_collect_scoped(
+    root: &Path,
+    paths: &[std::path::PathBuf],
+    scrubber: &Scrubber,
+) -> Option<String> {
+    let mut body = String::new();
+    let mut included = 0_usize;
+    let mut skipped = 0_usize;
+
+    for rel in paths {
+        let abs = if rel.is_absolute() {
+            rel.clone()
+        } else {
+            root.join(rel)
+        };
+        if !abs.is_file() {
+            skipped += 1;
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&abs) {
+            Ok(s) => s,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let (content, _report) = scrubber.scrub_file(rel, &raw);
+        let lang = lang_for_path(rel);
+        body.push_str(&format!(
+            "### `{}`\n```{lang}\n{}\n```\n\n",
+            rel.display(),
+            content.trim_end()
+        ));
+        included += 1;
+    }
+
+    if included == 0 {
+        return None;
+    }
+
+    let mut header = format!("{included} file(s) included via --files-from");
+    if skipped > 0 {
+        header.push_str(&format!(
+            " ({skipped} listed path(s) skipped: missing, not a regular file, or unreadable)"
+        ));
+    }
+    header.push_str(".\n\n");
+    Some(format!("{header}{body}"))
+}
+
+fn lang_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "rust",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("json") => "json",
+        Some("md") => "markdown",
+        Some("sh" | "bash") => "bash",
+        Some("py") => "python",
+        Some("ts") => "typescript",
+        Some("js") => "javascript",
+        _ => "",
+    }
 }
 
 fn try_collect_tests(root: &Path, changed: &[std::path::PathBuf]) -> Option<String> {
@@ -844,5 +946,81 @@ mod tests {
             rendered.contains("1 redacted by path rules"),
             "header should report path-redacted count; got:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn try_collect_scoped_includes_real_files_and_skips_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.rs");
+        std::fs::write(&real, "fn answer() -> u8 { 42 }\n").unwrap();
+        let scrubber = Scrubber::empty();
+
+        let paths = vec![
+            std::path::PathBuf::from("real.rs"),
+            std::path::PathBuf::from("does_not_exist.rs"),
+        ];
+        let out = try_collect_scoped(tmp.path(), &paths, &scrubber)
+            .expect("at least one real file → Some");
+
+        assert!(out.contains("real.rs"));
+        assert!(out.contains("fn answer"));
+        assert!(out.contains("1 file(s) included via --files-from"));
+        assert!(
+            out.contains("1 listed path(s) skipped"),
+            "missing path should bump the skipped counter; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn try_collect_scoped_returns_none_when_all_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scrubber = Scrubber::empty();
+        let paths = vec![
+            std::path::PathBuf::from("nope1.rs"),
+            std::path::PathBuf::from("nope2.rs"),
+        ];
+        assert!(try_collect_scoped(tmp.path(), &paths, &scrubber).is_none());
+    }
+
+    #[test]
+    fn try_collect_scoped_applies_path_redaction() {
+        use crate::scrub::ScrubConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let env_file = tmp.path().join(".env");
+        std::fs::write(&env_file, "DB_PASSWORD=hunter2\n").unwrap();
+
+        let config = ScrubConfig {
+            paths: crate::scrub::paths::PathRulesRaw {
+                redact_whole: vec!["**/.env".into()],
+                exclude: vec![],
+            },
+            ..Default::default()
+        };
+        let scrubber = Scrubber::from_config(&config).unwrap();
+
+        let paths = vec![std::path::PathBuf::from(".env")];
+        let out = try_collect_scoped(tmp.path(), &paths, &scrubber).unwrap();
+        assert!(
+            !out.contains("hunter2"),
+            "redacted file content leaked: {out}"
+        );
+        assert!(out.contains("[REDACTED FILE:"));
+    }
+
+    #[test]
+    fn lang_for_path_maps_common_extensions() {
+        let cases = [
+            ("a.rs", "rust"),
+            ("b.toml", "toml"),
+            ("c.yaml", "yaml"),
+            ("d.yml", "yaml"),
+            ("e.json", "json"),
+            ("f.md", "markdown"),
+            ("g.unknown", ""),
+            ("noext", ""),
+        ];
+        for (file, expected) in cases {
+            assert_eq!(lang_for_path(Path::new(file)), expected, "for {file}");
+        }
     }
 }
