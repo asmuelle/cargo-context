@@ -15,8 +15,10 @@ pub enum BudgetStrategy {
     #[default]
     Priority,
 
-    /// Scale every section proportionally to fit. Not yet implemented for
-    /// text; currently aliased to [`BudgetStrategy::Priority`].
+    /// Scale every competing section proportionally to its share of the
+    /// total. Nothing is dropped unless its proportional slot rounds to
+    /// zero tokens. Good when you want a balanced snapshot rather than a
+    /// priority-biased triage.
     Proportional,
 
     /// Keep sections in priority order until one overflows; hard-truncate
@@ -77,9 +79,8 @@ pub fn allocate(
 ) -> Allocation {
     let limit = budget.effective();
     match budget.strategy {
-        BudgetStrategy::Priority | BudgetStrategy::Proportional => {
-            apply_priority(candidates, limit)
-        }
+        BudgetStrategy::Priority => apply_priority(candidates, limit),
+        BudgetStrategy::Proportional => apply_proportional(candidates, limit, tokenizer),
         BudgetStrategy::Truncate => apply_truncate(candidates, limit, tokenizer),
     }
 }
@@ -171,6 +172,95 @@ fn apply_truncate(
 
     // Any competing section we didn't process (because we broke out of the
     // loop above) was already fully consumed; nothing else to do.
+    Allocation {
+        kept,
+        dropped,
+        tokens_used: exempt_tokens + running,
+        tokens_budget: limit,
+    }
+}
+
+fn apply_proportional(
+    candidates: Vec<(Priority, Section)>,
+    limit: usize,
+    tokenizer: &Tokenizer,
+) -> Allocation {
+    let (exempt, mut competing): (Vec<Section>, Vec<(Priority, Section)>) =
+        candidates.into_iter().partition_map(|(p, s)| {
+            if p == P_EXEMPT {
+                Left(s)
+            } else {
+                Right((p, s))
+            }
+        });
+    competing.sort_by_key(|(p, _)| *p);
+
+    let exempt_tokens: usize = exempt.iter().map(|s| s.token_estimate).sum();
+    let remaining = limit.saturating_sub(exempt_tokens);
+    let total_competing: usize = competing.iter().map(|(_, s)| s.token_estimate).sum();
+
+    let mut kept = exempt;
+    let mut dropped: Vec<String> = Vec::new();
+    let mut running: usize = 0;
+
+    if total_competing == 0 {
+        return Allocation {
+            kept,
+            dropped,
+            tokens_used: exempt_tokens,
+            tokens_budget: limit,
+        };
+    }
+
+    // Fast path: everything fits, no truncation needed.
+    if total_competing <= remaining {
+        for (_, s) in competing {
+            running += s.token_estimate;
+            kept.push(s);
+        }
+        return Allocation {
+            kept,
+            dropped,
+            tokens_used: exempt_tokens + running,
+            tokens_budget: limit,
+        };
+    }
+
+    // Scale every competing section by the same ratio.
+    let ratio = remaining as f64 / total_competing as f64;
+    let marker = "\n\n[... truncated by --budget-strategy=proportional ...]";
+    let marker_tokens = tokenizer.count(marker);
+    for (_, mut s) in competing {
+        let target_tokens = ((s.token_estimate as f64) * ratio).floor() as usize;
+        if target_tokens == 0 {
+            // Section would be reduced to nothing; drop it rather than emit
+            // an empty rendered section.
+            dropped.push(s.name);
+            continue;
+        }
+        if target_tokens >= s.token_estimate {
+            running += s.token_estimate;
+            kept.push(s);
+            continue;
+        }
+        // Budget for body = target minus the marker's cost.
+        let body_tokens = target_tokens.saturating_sub(marker_tokens);
+        if body_tokens == 0 {
+            dropped.push(s.name);
+            continue;
+        }
+        let orig_chars = s.content.chars().count();
+        let orig_tokens = s.token_estimate.max(1);
+        let char_target =
+            ((orig_chars as f64) * (body_tokens as f64) / (orig_tokens as f64)) as usize;
+        let mut new_content: String = s.content.chars().take(char_target).collect();
+        new_content.push_str(marker);
+        s.content = new_content;
+        s.token_estimate = tokenizer.count(&s.content);
+        running += s.token_estimate;
+        kept.push(s);
+    }
+
     Allocation {
         kept,
         dropped,
@@ -321,5 +411,84 @@ mod tests {
         assert!(a.kept.is_empty());
         assert!(a.dropped.is_empty());
         assert_eq!(a.tokens_used, 0);
+    }
+
+    #[test]
+    fn proportional_scales_all_sections_when_over_budget() {
+        let candidates = vec![(P_ERROR, mk("errors", 400)), (P_DIFF, mk("diff", 600))];
+        let b = Budget {
+            max_tokens: 500,
+            reserve_tokens: 0,
+            strategy: BudgetStrategy::Proportional,
+        };
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
+        // Both sections survive (the whole point of proportional: no drops).
+        assert_eq!(a.kept.len(), 2);
+        assert!(a.dropped.is_empty());
+        // Both got truncated.
+        assert!(
+            a.kept.iter().all(|s| s.content.contains("truncated")),
+            "all oversized sections should carry the truncation marker"
+        );
+        // Budget is honored.
+        assert!(
+            a.tokens_used <= b.max_tokens,
+            "tokens_used {} exceeded budget {}",
+            a.tokens_used,
+            b.max_tokens
+        );
+    }
+
+    #[test]
+    fn proportional_keeps_whole_when_under_budget() {
+        let candidates = vec![(P_ERROR, mk("errors", 100)), (P_DIFF, mk("diff", 200))];
+        let b = Budget {
+            max_tokens: 1000,
+            reserve_tokens: 0,
+            strategy: BudgetStrategy::Proportional,
+        };
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
+        assert_eq!(a.kept.len(), 2);
+        assert_eq!(a.tokens_used, 300);
+        assert!(a.dropped.is_empty());
+        assert!(
+            a.kept.iter().all(|s| !s.content.contains("truncated")),
+            "under-budget allocation should not truncate"
+        );
+    }
+
+    #[test]
+    fn proportional_always_keeps_exempt() {
+        let candidates = vec![
+            (P_EXEMPT, mk("📝 User Prompt", 100)),
+            (P_ERROR, mk("errors", 500)),
+        ];
+        let b = Budget {
+            max_tokens: 200,
+            reserve_tokens: 0,
+            strategy: BudgetStrategy::Proportional,
+        };
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
+        // Prompt kept whole; errors proportionally scaled into remaining 100.
+        assert!(a.kept.iter().any(|s| s.name.contains("Prompt")));
+    }
+
+    #[test]
+    fn proportional_drops_zero_slot_sections() {
+        // Tiny section + huge section with tight budget: tiny's share rounds
+        // to zero. Preferable to emit an empty section? No — drop it and
+        // report.
+        let candidates = vec![(P_ERROR, mk("tiny", 1)), (P_DIFF, mk("huge", 10_000))];
+        let b = Budget {
+            max_tokens: 100,
+            reserve_tokens: 0,
+            strategy: BudgetStrategy::Proportional,
+        };
+        let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
+        assert!(
+            a.dropped.contains(&"tiny".to_string()),
+            "zero-slot section should be dropped, got dropped={:?}",
+            a.dropped
+        );
     }
 }
