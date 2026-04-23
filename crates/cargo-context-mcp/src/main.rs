@@ -1,18 +1,198 @@
-//! MCP (Model Context Protocol) server — skeleton.
+//! MCP (Model Context Protocol) server for cargo-context.
 //!
-//! The real implementation will use the `rmcp` crate once its API stabilizes.
-//! This skeleton speaks a minimal JSON-RPC 2.0 loop over stdio so the process
-//! is observable and spawnable from Claude Code / Cursor / Continue today.
+//! Built on [`rmcp`], the official Rust SDK. The hand-rolled JSON-RPC loop
+//! this replaces covered the initialize/tools/list surface but did not
+//! implement the full protocol (notifications, cancellation, proper
+//! capability negotiation, structured content). rmcp handles all of that;
+//! we just declare the tools.
 //!
-//! Diagnostics go to stderr so they never pollute the JSON-RPC channel.
+//! Transport: stdio. Launch this binary from any MCP client (Claude Code,
+//! Cursor, Continue, Zed AI); the client spawns it as a child process and
+//! exchanges newline-delimited JSON-RPC over stdin/stdout.
+//!
+//! Diagnostics go to stderr via `tracing`, never polluting the JSON-RPC
+//! channel.
 
-use std::io::{BufRead, Write};
+use std::path::PathBuf;
 
 use anyhow::Result;
-use cargo_context_core::PackBuilder;
-use serde_json::{json, Value};
+use cargo_context_core::{Budget, BudgetStrategy, PackBuilder, Preset, Tokenizer};
+use rmcp::{
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{Implementation, ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
+    transport::stdio,
+    ServerHandler, ServiceExt,
+};
+use serde::Deserialize;
 
-fn main() -> Result<()> {
+/// Assemble a context pack for the current Rust project.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BuildContextPackArgs {
+    /// Preset — `fix`, `feature`, or `custom`. Default is `custom`.
+    #[serde(default)]
+    pub preset: Option<String>,
+
+    /// Maximum tokens in the assembled pack. Default 8000.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+
+    /// Tokens reserved for the model's response. Default 2000.
+    #[serde(default)]
+    pub reserve_tokens: Option<usize>,
+
+    /// Tokenizer: llama3 / llama2 / tiktoken-cl100k / tiktoken-o200k / claude / chars-div4.
+    #[serde(default)]
+    pub tokenizer: Option<String>,
+
+    /// Budget strategy: priority / proportional / truncate.
+    #[serde(default)]
+    pub budget_strategy: Option<String>,
+}
+
+/// Parameters for a git-diff query.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetDiffArgs {
+    /// Optional git range, e.g. `HEAD~3..HEAD`. `None` means the working-tree
+    /// diff against HEAD.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct CargoContextServer {
+    // Consumed by the `#[tool_handler]` macro; dead-code analysis misses it.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<Self>,
+}
+
+impl Default for CargoContextServer {
+    fn default() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[tool_router]
+impl CargoContextServer {
+    #[tool(
+        name = "build_context_pack",
+        description = "Assemble a scrubbed, budgeted context pack for the current Rust project. \
+                       Respects .cargo-context/scrub.yaml if present."
+    )]
+    async fn build_context_pack(
+        &self,
+        Parameters(args): Parameters<BuildContextPackArgs>,
+    ) -> Result<String, String> {
+        let preset = match args.preset.as_deref() {
+            Some("fix") => Preset::Fix,
+            Some("feature") => Preset::Feature,
+            _ => Preset::Custom,
+        };
+        let tokenizer = match args.tokenizer.as_deref() {
+            Some("llama2") => Tokenizer::Llama2,
+            Some("tiktoken-cl100k") => Tokenizer::TiktokenCl100k,
+            Some("tiktoken-o200k") => Tokenizer::TiktokenO200k,
+            Some("claude") => Tokenizer::Claude,
+            Some("chars-div4") => Tokenizer::CharsDiv4,
+            _ => Tokenizer::Llama3,
+        };
+        let strategy = match args.budget_strategy.as_deref() {
+            Some("proportional") => BudgetStrategy::Proportional,
+            Some("truncate") => BudgetStrategy::Truncate,
+            _ => BudgetStrategy::Priority,
+        };
+        let budget = Budget {
+            max_tokens: args.max_tokens.unwrap_or(8000),
+            reserve_tokens: args.reserve_tokens.unwrap_or(2000),
+            strategy,
+        };
+
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let pack = PackBuilder::new()
+            .preset(preset)
+            .budget(budget)
+            .tokenizer(tokenizer)
+            .scrub(true)
+            .project_root(root)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        Ok(pack.render_markdown())
+    }
+
+    #[tool(
+        name = "get_last_error",
+        description = "Run cargo check and return structured compiler diagnostics \
+                       (JSON: level, code, message, primary_file, line, column)."
+    )]
+    async fn get_last_error(&self) -> Result<String, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let d = cargo_context_core::collect::last_error(&root).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&d).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "get_diff",
+        description = "Return the scrubbed git diff as structured JSON \
+                       (FileDiff[] with status and hunk bodies)."
+    )]
+    async fn get_diff(&self, Parameters(args): Parameters<GetDiffArgs>) -> Result<String, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let diff = cargo_context_core::collect::git_diff(&root, args.range.as_deref())
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&diff).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "expand_macros",
+        description = "Macro-expand a file via cargo-expand. `file` must live inside the \
+                       workspace; `crate_name` is the owning Cargo package."
+    )]
+    async fn expand_macros(
+        &self,
+        Parameters(args): Parameters<ExpandMacrosArgs>,
+    ) -> Result<String, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let file = PathBuf::from(&args.file);
+        match cargo_context_core::expand::expand_file(&root, &args.crate_name, &file)
+            .map_err(|e| e.to_string())?
+        {
+            Some(expanded) => Ok(expanded),
+            None => Err("cargo-expand not available or expansion failed".into()),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExpandMacrosArgs {
+    /// Absolute or workspace-relative path to the file to expand.
+    pub file: String,
+    /// Cargo package name that owns the file.
+    pub crate_name: String,
+}
+
+#[tool_handler]
+impl ServerHandler for CargoContextServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "cargo-context-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "High-fidelity context engineering for Rust AI workflows. \
+                 Use `build_context_pack` to assemble a scrubbed, budgeted pack \
+                 of the current Rust project's state (diff, errors, metadata, \
+                 entry points, related tests). Individual collectors are also \
+                 exposed as standalone tools.",
+            )
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -23,143 +203,10 @@ fn main() -> Result<()> {
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        "cargo-context-mcp starting (stdio transport, skeleton)"
+        "cargo-context-mcp starting"
     );
 
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(req) => handle(req),
-            Err(e) => json!({
-                "jsonrpc": "2.0",
-                "error": { "code": -32700, "message": format!("parse error: {e}") },
-                "id": null
-            }),
-        };
-
-        writeln!(stdout, "{response}")?;
-        stdout.flush()?;
-    }
-
+    let service = CargoContextServer::default().serve(stdio()).await?;
+    service.waiting().await?;
     Ok(())
-}
-
-fn handle(req: Value) -> Value {
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-
-    match method {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "cargo-context-mcp",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "tools": {},
-                    "resources": {},
-                    "prompts": {}
-                }
-            }
-        }),
-
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "build_context_pack",
-                        "description": "Assemble a scrubbed, budgeted context pack for the current Rust project.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "preset": { "type": "string", "enum": ["fix", "feature", "custom"] },
-                                "max_tokens": { "type": "integer", "minimum": 500 },
-                                "tokenizer": { "type": "string" },
-                                "include_paths": { "type": "array", "items": { "type": "string" } },
-                                "exclude_paths": { "type": "array", "items": { "type": "string" } }
-                            }
-                        }
-                    },
-                    { "name": "get_last_error", "description": "Return captured compiler diagnostics plus referenced files." },
-                    { "name": "get_diff", "description": "Return a scrubbed git diff with file-level summaries." },
-                    { "name": "expand_macros", "description": "Return macro-expanded source for the given file." }
-                ]
-            }
-        }),
-
-        "tools/call" => handle_tool_call(id, &req),
-
-        "resources/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "resources": [
-                    { "uri": "cargo-context://pack/current", "name": "Current context pack" },
-                    { "uri": "cargo-context://map", "name": "Workspace map" }
-                ]
-            }
-        }),
-
-        "prompts/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "prompts": [
-                    { "name": "fix_compiler_error", "description": "Pack + instruction to fix the latest compiler error." }
-                ]
-            }
-        }),
-
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": format!("method not found: {method}") }
-        }),
-    }
-}
-
-fn handle_tool_call(id: Value, req: &Value) -> Value {
-    let params = req.get("params").cloned().unwrap_or(Value::Null);
-    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-
-    match name {
-        "build_context_pack" => match build_pack() {
-            Ok(text) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [ { "type": "text", "text": text } ],
-                    "isError": false
-                }
-            }),
-            Err(e) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32000, "message": e.to_string() }
-            }),
-        },
-        other => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": format!("unknown tool: {other}") }
-        }),
-    }
-}
-
-fn build_pack() -> Result<String> {
-    let root = std::env::current_dir()?;
-    let pack = PackBuilder::new().project_root(root).build()?;
-    Ok(pack.render_markdown())
 }
