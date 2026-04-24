@@ -21,18 +21,14 @@ fn bin() -> &'static str {
 /// Scaffold a throwaway project root with `paths` as repo-relative
 /// source files (populated with a one-liner body keyed off the
 /// filename) plus an `impact.json` envelope at the given path.
-fn scaffold(
-    paths: &[&str],
-    envelope: &str,
-) -> (tempfile::TempDir, std::path::PathBuf) {
+fn scaffold(paths: &[&str], envelope: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().expect("mk tempdir");
     for p in paths {
         let abs = tmp.path().join(p);
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent).expect("mkdir parent");
         }
-        std::fs::write(&abs, format!("// {p}\npub fn placeholder() {{}}\n"))
-            .expect("write source");
+        std::fs::write(&abs, format!("// {p}\npub fn placeholder() {{}}\n")).expect("write source");
     }
     let envelope_path = tmp.path().join("impact.json");
     std::fs::write(&envelope_path, envelope).expect("write envelope");
@@ -114,15 +110,15 @@ const ENVELOPE: &str = r#"{
 #[test]
 fn aggregated_mode_sorts_by_confidence_desc() {
     let (tmp, envelope) = scaffold(&["src/hot.rs", "src/warm.rs", "README"], ENVELOPE);
-    let out = run(
-        tmp.path(),
-        &["--impact-scope", envelope.to_str().unwrap()],
-    );
+    let out = run(tmp.path(), &["--impact-scope", envelope.to_str().unwrap()]);
 
     let hot = out.find("src/hot.rs").expect("hot rendered");
     let warm = out.find("src/warm.rs").expect("warm rendered");
     let cold = out.find("README").expect("cold rendered");
-    assert!(hot < warm && warm < cold, "confidence order violated:\n{out}");
+    assert!(
+        hot < warm && warm < cold,
+        "confidence order violated:\n{out}"
+    );
 
     assert!(
         out.contains("Scoped Files"),
@@ -152,7 +148,10 @@ fn min_confidence_drops_findings_below_threshold() {
         ],
     );
     assert!(out.contains("src/hot.rs"));
-    assert!(!out.contains("src/warm.rs"), "warm should be filtered:\n{out}");
+    assert!(
+        !out.contains("src/warm.rs"),
+        "warm should be filtered:\n{out}"
+    );
     assert!(!out.contains("f-cold"), "cold should be filtered:\n{out}");
 }
 
@@ -217,10 +216,7 @@ fn missing_files_are_counted_not_fatal() {
     // should bump the skipped counter in the section header, not crash
     // the run.
     let (tmp, envelope) = scaffold(&["src/hot.rs"], ENVELOPE);
-    let out = run(
-        tmp.path(),
-        &["--impact-scope", envelope.to_str().unwrap()],
-    );
+    let out = run(tmp.path(), &["--impact-scope", envelope.to_str().unwrap()]);
     assert!(out.contains("src/hot.rs"));
     assert!(
         out.contains("2 listed path(s) skipped"),
