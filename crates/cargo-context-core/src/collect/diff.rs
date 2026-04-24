@@ -142,7 +142,7 @@ fn run_git(root: &Path, args: &[String]) -> Result<String> {
         .current_dir(root)
         .args(args)
         .output()
-        .map_err(|e| Error::Config(format!("failed to spawn git: {e}")))?;
+        .map_err(|e| Error::Tool(format!("failed to spawn git: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // A non-repo, missing HEAD, or "use --no-index" nudge is legitimately
@@ -154,7 +154,7 @@ fn run_git(root: &Path, args: &[String]) -> Result<String> {
         {
             return Ok(String::new());
         }
-        return Err(Error::Config(format!(
+        return Err(Error::Tool(format!(
             "git {:?} failed: {}",
             args,
             stderr.trim()

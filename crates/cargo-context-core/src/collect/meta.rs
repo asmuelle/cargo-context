@@ -75,7 +75,7 @@ pub fn cargo_metadata(root: &Path) -> Result<WorkspaceMap> {
         .current_dir(root)
         .no_deps()
         .exec()
-        .map_err(|e| Error::Config(format!("cargo metadata failed: {e}")))?;
+        .map_err(|e| Error::Tool(format!("cargo metadata failed: {e}")))?;
 
     let root_package = meta.root_package().map(|p| p.name.clone());
     let members: Vec<WorkspaceMember> = meta

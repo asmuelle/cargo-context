@@ -17,6 +17,12 @@ pub enum Error {
     #[error("budget exceeded: {actual} tokens > {limit}")]
     BudgetExceeded { actual: usize, limit: usize },
 
+    #[error("external tool failed: {0}")]
+    Tool(String),
+
+    #[error("invalid glob: {0}")]
+    Glob(String),
+
     #[error("invalid configuration: {0}")]
     Config(String),
 
