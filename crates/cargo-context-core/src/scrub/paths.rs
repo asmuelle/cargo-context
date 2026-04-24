@@ -66,8 +66,7 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
         let glob = Glob::new(p).map_err(|e| Error::Glob(format!("invalid glob `{p}`: {e}")))?;
         b.add(glob);
     }
-    b.build()
-        .map_err(|e| Error::Glob(format!("globset: {e}")))
+    b.build().map_err(|e| Error::Glob(format!("globset: {e}")))
 }
 
 #[cfg(test)]
