@@ -34,10 +34,10 @@ What's implemented and shipping today:
 | **Scrubber** — built-in regex (AWS/GitHub/OpenAI/Anthropic/HF/Google/Slack/JWT/PEM); Shannon-entropy detection; path-globs (`.env`, `*.pem`, …); allowlist; YAML config; JSONL audit log | ✅ |
 | **Macro expansion** — `cargo-expand` shell-out with `(path, mtime, lockhash)` cache | ✅ |
 | **MCP server** — `cargo-context-mcp` binary on the official `rmcp` SDK; four tools | ✅ |
-| **CLI** — `cargo context [pack flags]` and `cargo context scrub --check`; `--files-from <PATH\|->` for cargo-impact interop; `--scrub-report` / `--strict-scrub` for CI | ✅ |
+| **CLI** — `cargo context [pack flags]` and `cargo context scrub --check`; `--files-from <PATH\|->` and `--impact-scope <PATH\|->` for cargo-impact interop; `--scrub-report` / `--strict-scrub` for CI | ✅ |
 | **Output formats** — markdown / xml / json / plain | ✅ |
 | **MCP resources & prompts** | 🚧 (only tools today) |
-| **`--impact-scope` JSON envelope** ([#5](https://github.com/asmuelle/cargo-context/issues/5)) | 🚧 |
+| **`--impact-scope` JSON envelope** ([#5](https://github.com/asmuelle/cargo-context/issues/5)) — confidence-sorted Scoped Files, `--min-confidence`, `--per-finding`, `--exclude-ids`, kind-aware language hints | ✅ |
 
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
@@ -105,6 +105,17 @@ echo "why does verify_token return None?" | cargo context --fix
 # Scope to specific files (cargo-impact interop)
 cargo impact --context | cargo context --files-from -
 
+# Consume a structured cargo-impact envelope — each finding becomes a
+# Scoped File ordered by confidence desc, with per-file headers surfacing
+# id / kind / severity / tier / confidence and kind-aware language hints.
+cargo impact --format=json | cargo context --impact-scope -
+
+# Filter by confidence, skip already-verified findings, or iterate one
+# finding at a time.
+cargo context --impact-scope impact.json --min-confidence 0.8
+cargo context --impact-scope impact.json --exclude-ids f-aaaa,f-bbbb
+cargo context --impact-scope impact.json --per-finding
+
 # Validate the scrubber config without building a pack
 cargo context scrub --check
 ```
@@ -122,6 +133,10 @@ cargo context scrub --check
 | `--expand-macros <off\|auto\|on>` | `off` | Run `cargo-expand` and include expanded source. Auto fires when the diff has `.rs` files. |
 | `-f, --format <markdown\|xml\|json\|plain>` | `markdown` | Output format. Use `xml` for Claude, `json` for programmatic consumers. |
 | `--files-from <PATH\|->` | — | Newline-delimited repo-relative paths to embed in a "📂 Scoped Files" section. `-` reads stdin. |
+| `--impact-scope <PATH\|->` | — | Consume a `cargo-impact --format=json` envelope. Findings are filtered, sorted by confidence desc, and rendered as a "📂 Scoped Files" section. `-` reads stdin. Conflicts with `--files-from`. |
+| `--min-confidence <F>` | — | Drop findings whose confidence is below `F` (range `[0.0, 1.0]`). Findings with no confidence field survive. Requires `--impact-scope`. |
+| `--per-finding` | off | Emit one `📂 Impact: <id>` section per finding (with evidence + suggested action) instead of a single aggregated section. Requires `--impact-scope`. |
+| `--exclude-ids <IDS>` | — | Comma-separated finding ids to skip (e.g. `f-aaaa,f-bbbb`). Requires `--impact-scope`. |
 | `--include-path <GLOB>` | — | Force-include paths (repeatable). |
 | `--exclude-path <GLOB>` | — | Exclude paths (repeatable). |
 

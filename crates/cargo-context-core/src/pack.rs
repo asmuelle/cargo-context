@@ -6,6 +6,7 @@ use crate::budget::{self, Budget, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_T
 use crate::collect::{self, Diagnostics, Diff, EntryPoints, RelatedTests, WorkspaceMap};
 use crate::error::Result;
 use crate::expand::{self, ExpandMode};
+use crate::impact::Finding;
 use crate::scrub::Scrubber;
 use crate::tokenize::Tokenizer;
 
@@ -116,6 +117,8 @@ pub struct PackBuilder {
     project_root: Option<std::path::PathBuf>,
     stdin_prompt: Option<String>,
     files_from: Vec<std::path::PathBuf>,
+    impact_findings: Vec<Finding>,
+    impact_per_finding: bool,
 }
 
 impl Default for PackBuilder {
@@ -131,6 +134,8 @@ impl Default for PackBuilder {
             project_root: None,
             stdin_prompt: None,
             files_from: Vec::new(),
+            impact_findings: Vec::new(),
+            impact_per_finding: false,
         }
     }
 }
@@ -196,6 +201,34 @@ impl PackBuilder {
     /// gets surfaced even when the scoped file isn't in `git diff`.
     pub fn files_from(mut self, paths: Vec<std::path::PathBuf>) -> Self {
         self.files_from = paths;
+        self
+    }
+
+    /// Findings pulled from a `cargo-impact --format=json` envelope.
+    ///
+    /// Differs from [`Self::files_from`] in that each finding carries
+    /// metadata (id, kind, confidence, severity, tier, evidence,
+    /// suggested action) that can drive richer rendering:
+    ///
+    /// - In the default aggregated mode, the list is rendered as a single
+    ///   "📂 Scoped Files" section with files ordered by the caller-supplied
+    ///   order (typically confidence-descending) and per-file headers that
+    ///   surface confidence/severity/tier.
+    /// - When [`Self::impact_per_finding`] is set, each finding becomes its
+    ///   own "📂 Impact: …" section — useful when an agent wants to iterate
+    ///   through findings one at a time.
+    ///
+    /// Finding paths join the diff-changed set for related-tests linkage,
+    /// mirroring `files_from`.
+    pub fn impact_findings(mut self, findings: Vec<Finding>) -> Self {
+        self.impact_findings = findings;
+        self
+    }
+
+    /// Emit one pack section per finding instead of one aggregated
+    /// section. No-op when `impact_findings` is empty.
+    pub fn impact_per_finding(mut self, on: bool) -> Self {
+        self.impact_per_finding = on;
         self
     }
 
@@ -293,11 +326,29 @@ impl PackBuilder {
                 mk_section("🧭 Entry Points", &content, &self.tokenizer),
             ));
         }
-        // Scoped files from `--files-from` (e.g. `cargo impact --context`).
-        // Slotted at the diff priority: these are explicit "here is what
-        // matters" signals and deserve to survive budget pressure on par
-        // with the actual diff.
-        if !self.files_from.is_empty()
+        // Scoped files from `--files-from` or `--impact-scope`. Slotted at
+        // the diff priority: explicit "here is what matters" signals
+        // deserve to survive budget pressure on par with the actual diff.
+        //
+        // impact_findings takes precedence when both are provided —
+        // findings carry richer metadata (confidence, kind) that drives
+        // header/ordering logic.
+        if !self.impact_findings.is_empty() {
+            if self.impact_per_finding {
+                for (idx, f) in self.impact_findings.iter().enumerate() {
+                    if let Some((name, body)) = try_collect_per_finding(&root, f, idx, &scrubber) {
+                        candidates.push((P_DIFF, mk_section(&name, &body, &self.tokenizer)));
+                    }
+                }
+            } else if let Some(content) =
+                try_collect_scoped_findings(&root, &self.impact_findings, &scrubber)
+            {
+                candidates.push((
+                    P_DIFF,
+                    mk_section("📂 Scoped Files", &content, &self.tokenizer),
+                ));
+            }
+        } else if !self.files_from.is_empty()
             && let Some(content) = try_collect_scoped(&root, &self.files_from, &scrubber)
         {
             candidates.push((
@@ -307,12 +358,14 @@ impl PackBuilder {
         }
 
         if wants.tests {
-            // Union of diff-changed and files-from for related-tests linkage.
+            // Union of diff-changed, files-from, and impact-finding paths
+            // for related-tests linkage.
             let mut changed: Vec<std::path::PathBuf> = diff
                 .as_ref()
                 .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
                 .unwrap_or_default();
             changed.extend(self.files_from.iter().cloned());
+            changed.extend(self.impact_findings.iter().map(|f| f.primary_path.clone()));
             if !changed.is_empty()
                 && let Some(content) = try_collect_tests(&root, &changed)
             {
@@ -510,7 +563,151 @@ fn try_collect_scoped(
     Some(format!("{header}{body}"))
 }
 
-fn lang_for_path(path: &Path) -> &'static str {
+/// Aggregated impact-scope rendering: one Scoped Files section with
+/// per-file headers showing the finding's confidence/severity/tier and
+/// kind-aware language hints. Findings are rendered in the order passed
+/// in (the CLI sorts by confidence desc before building), deduped by
+/// path so a file referenced by many findings only renders once — with
+/// the other findings summarized in its header.
+fn try_collect_scoped_findings(
+    root: &Path,
+    findings: &[Finding],
+    scrubber: &Scrubber,
+) -> Option<String> {
+    let mut body = String::new();
+    let mut included = 0_usize;
+    let mut skipped = 0_usize;
+    let mut emitted: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
+    for (i, f) in findings.iter().enumerate() {
+        if !emitted.insert(f.primary_path.clone()) {
+            continue;
+        }
+        let abs = if f.primary_path.is_absolute() {
+            f.primary_path.clone()
+        } else {
+            root.join(&f.primary_path)
+        };
+        if !abs.is_file() {
+            skipped += 1;
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&abs) {
+            Ok(s) => s,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let (content, _report) = scrubber.scrub_file(&f.primary_path, &raw);
+        let lang = f.language_hint();
+
+        // Gather every finding that names this path — the first drove
+        // inclusion, the rest get summarized on the same header.
+        let co_findings: Vec<&Finding> = findings
+            .iter()
+            .skip(i)
+            .filter(|g| g.primary_path == f.primary_path)
+            .collect();
+        let header = format_file_header(&f.primary_path, &co_findings);
+
+        body.push_str(&format!(
+            "{header}\n```{lang}\n{}\n```\n\n",
+            content.trim_end()
+        ));
+        included += 1;
+    }
+
+    if included == 0 {
+        return None;
+    }
+
+    let mut preamble =
+        format!("{included} file(s) included via --impact-scope (sorted by confidence desc)");
+    if skipped > 0 {
+        preamble.push_str(&format!(
+            "; {skipped} listed path(s) skipped (missing or unreadable)"
+        ));
+    }
+    preamble.push_str(".\n\n");
+    Some(format!("{preamble}{body}"))
+}
+
+/// Per-finding rendering: each finding becomes a standalone section. The
+/// caller slots these at `P_DIFF` just like the aggregated form, so
+/// low-confidence findings still benefit from budget pressure — the
+/// allocate step drops the tail when the pack overflows.
+fn try_collect_per_finding(
+    root: &Path,
+    f: &Finding,
+    idx: usize,
+    scrubber: &Scrubber,
+) -> Option<(String, String)> {
+    let abs = if f.primary_path.is_absolute() {
+        f.primary_path.clone()
+    } else {
+        root.join(&f.primary_path)
+    };
+    if !abs.is_file() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&abs).ok()?;
+    let (content, _report) = scrubber.scrub_file(&f.primary_path, &raw);
+    let lang = f.language_hint();
+
+    let label =
+        f.id.clone()
+            .unwrap_or_else(|| format!("finding-{}", idx + 1));
+    let descriptor = f.descriptor();
+    let name = if descriptor.is_empty() {
+        format!("📂 Impact: {label}")
+    } else {
+        format!("📂 Impact: {label} ({descriptor})")
+    };
+
+    let mut body = String::new();
+    if let Some(ev) = &f.evidence {
+        body.push_str(&format!("**Evidence:** {ev}\n\n"));
+    }
+    if let Some(act) = &f.suggested_action {
+        body.push_str(&format!("**Suggested action:** `{act}`\n\n"));
+    }
+    body.push_str(&format!(
+        "### `{}`\n```{lang}\n{}\n```\n",
+        f.primary_path.display(),
+        content.trim_end()
+    ));
+
+    Some((name, body))
+}
+
+/// Build a per-file header for the aggregated Scoped Files section. When
+/// several findings name the same path, list each finding's
+/// id+descriptor so the reader can still correlate file content with
+/// analyzer hits.
+fn format_file_header(path: &Path, findings: &[&Finding]) -> String {
+    let mut header = format!("### `{}`", path.display());
+    let labels: Vec<String> = findings
+        .iter()
+        .map(|f| {
+            let id = f.id.as_deref().unwrap_or("finding");
+            let d = f.descriptor();
+            if d.is_empty() {
+                id.to_string()
+            } else {
+                format!("{id}: {d}")
+            }
+        })
+        .collect();
+    if !labels.is_empty() {
+        header.push_str(" — ");
+        header.push_str(&labels.join("; "));
+    }
+    header
+}
+
+pub(crate) fn lang_for_path(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rs") => "rust",
         Some("toml") => "toml",
@@ -1005,6 +1202,220 @@ mod tests {
             "redacted file content leaked: {out}"
         );
         assert!(out.contains("[REDACTED FILE:"));
+    }
+
+    #[test]
+    fn impact_aggregated_sorts_by_caller_order_and_reports_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("hot.rs"), "fn hot() {}\n").unwrap();
+        std::fs::write(tmp.path().join("warm.rs"), "fn warm() {}\n").unwrap();
+        // cold.rs intentionally missing to exercise the skipped counter.
+
+        let scrubber = Scrubber::empty();
+        let findings = vec![
+            Finding {
+                id: Some("f-hot".into()),
+                primary_path: std::path::PathBuf::from("hot.rs"),
+                kind: Some("trait_impl".into()),
+                confidence: Some(0.95),
+                severity: Some("high".into()),
+                tier: Some("likely".into()),
+                evidence: None,
+                suggested_action: None,
+            },
+            Finding {
+                id: Some("f-warm".into()),
+                primary_path: std::path::PathBuf::from("warm.rs"),
+                kind: None,
+                confidence: Some(0.50),
+                severity: None,
+                tier: None,
+                evidence: None,
+                suggested_action: None,
+            },
+            Finding {
+                id: Some("f-cold".into()),
+                primary_path: std::path::PathBuf::from("cold.rs"),
+                kind: None,
+                confidence: Some(0.10),
+                severity: None,
+                tier: None,
+                evidence: None,
+                suggested_action: None,
+            },
+        ];
+        let out = try_collect_scoped_findings(tmp.path(), &findings, &scrubber)
+            .expect("at least one finding resolves");
+        // Higher-confidence file comes first in the caller-ordered list.
+        assert!(
+            out.find("hot.rs").unwrap() < out.find("warm.rs").unwrap(),
+            "hot.rs should render before warm.rs:\n{out}"
+        );
+        // Per-file header surfaces id + descriptor.
+        assert!(out.contains("f-hot: trait_impl, high/likely, conf=0.95"));
+        // Missing finding is counted, not fatal.
+        assert!(
+            out.contains("1 listed path(s) skipped"),
+            "expected skipped counter in header: {out}"
+        );
+        assert!(out.contains("2 file(s) included via --impact-scope"));
+    }
+
+    #[test]
+    fn impact_aggregated_dedupes_co_located_findings_into_one_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("shared.rs"), "fn shared() {}\n").unwrap();
+        let scrubber = Scrubber::empty();
+
+        let findings = vec![
+            Finding {
+                id: Some("f1".into()),
+                primary_path: std::path::PathBuf::from("shared.rs"),
+                kind: Some("trait_impl".into()),
+                confidence: Some(0.9),
+                severity: None,
+                tier: None,
+                evidence: None,
+                suggested_action: None,
+            },
+            Finding {
+                id: Some("f2".into()),
+                primary_path: std::path::PathBuf::from("shared.rs"),
+                kind: Some("dyn_dispatch".into()),
+                confidence: Some(0.6),
+                severity: None,
+                tier: None,
+                evidence: None,
+                suggested_action: None,
+            },
+        ];
+        let out = try_collect_scoped_findings(tmp.path(), &findings, &scrubber).unwrap();
+
+        // Single rendered file block.
+        assert_eq!(out.matches("### `shared.rs`").count(), 1);
+        // Both finding ids land in the shared header.
+        assert!(out.contains("f1"));
+        assert!(out.contains("f2"));
+        // Header reports 1 file even though 2 findings fed it.
+        assert!(out.contains("1 file(s) included via --impact-scope"));
+    }
+
+    #[test]
+    fn impact_per_finding_emits_one_section_each_with_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let scrubber = Scrubber::empty();
+
+        let fa = Finding {
+            id: Some("f-aaa".into()),
+            primary_path: std::path::PathBuf::from("a.rs"),
+            kind: Some("trait_impl".into()),
+            confidence: Some(0.95),
+            severity: Some("high".into()),
+            tier: Some("likely".into()),
+            evidence: Some("Trait change affects downstream callers".into()),
+            suggested_action: Some("cargo nextest run -E 'test(a)'".into()),
+        };
+        let fb = Finding {
+            id: Some("f-bbb".into()),
+            primary_path: std::path::PathBuf::from("b.rs"),
+            kind: None,
+            confidence: None,
+            severity: None,
+            tier: None,
+            evidence: None,
+            suggested_action: None,
+        };
+
+        let (name_a, body_a) = try_collect_per_finding(tmp.path(), &fa, 0, &scrubber).unwrap();
+        assert_eq!(
+            name_a,
+            "📂 Impact: f-aaa (trait_impl, high/likely, conf=0.95)"
+        );
+        assert!(body_a.contains("**Evidence:** Trait change"));
+        assert!(body_a.contains("**Suggested action:** `cargo nextest run"));
+        assert!(body_a.contains("fn a() {}"));
+
+        let (name_b, body_b) = try_collect_per_finding(tmp.path(), &fb, 1, &scrubber).unwrap();
+        // No id would fall back to finding-N, but fb has an id.
+        assert_eq!(name_b, "📂 Impact: f-bbb");
+        assert!(!body_b.contains("**Evidence:**"));
+        assert!(body_b.contains("fn b() {}"));
+    }
+
+    #[test]
+    fn impact_per_finding_falls_back_to_positional_label_when_id_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("x.rs"), "fn x() {}\n").unwrap();
+        let scrubber = Scrubber::empty();
+        let f = Finding {
+            id: None,
+            primary_path: std::path::PathBuf::from("x.rs"),
+            kind: None,
+            confidence: None,
+            severity: None,
+            tier: None,
+            evidence: None,
+            suggested_action: None,
+        };
+        let (name, _) = try_collect_per_finding(tmp.path(), &f, 3, &scrubber).unwrap();
+        assert_eq!(name, "📂 Impact: finding-4");
+    }
+
+    #[test]
+    fn impact_per_finding_skips_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scrubber = Scrubber::empty();
+        let f = Finding {
+            id: Some("f-gone".into()),
+            primary_path: std::path::PathBuf::from("does_not_exist.rs"),
+            kind: None,
+            confidence: None,
+            severity: None,
+            tier: None,
+            evidence: None,
+            suggested_action: None,
+        };
+        assert!(try_collect_per_finding(tmp.path(), &f, 0, &scrubber).is_none());
+    }
+
+    #[test]
+    fn impact_findings_take_precedence_over_files_from_in_builder() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from_finding.rs"), "fn ff() {}\n").unwrap();
+        std::fs::write(tmp.path().join("from_files_list.rs"), "fn fl() {}\n").unwrap();
+
+        let pack = PackBuilder::new()
+            .project_root(tmp.path())
+            .files_from(vec![std::path::PathBuf::from("from_files_list.rs")])
+            .impact_findings(vec![Finding {
+                id: Some("f-only".into()),
+                primary_path: std::path::PathBuf::from("from_finding.rs"),
+                kind: None,
+                confidence: Some(0.9),
+                severity: None,
+                tier: None,
+                evidence: None,
+                suggested_action: None,
+            }])
+            .build()
+            .unwrap();
+
+        let scoped = pack
+            .sections
+            .iter()
+            .find(|s| s.name == "📂 Scoped Files")
+            .expect("Scoped Files section emitted");
+        assert!(
+            scoped.content.contains("from_finding.rs"),
+            "impact findings should drive the Scoped Files section:\n{}",
+            scoped.content
+        );
+        assert!(
+            !scoped.content.contains("from_files_list.rs"),
+            "files_from should be superseded by impact_findings"
+        );
     }
 
     #[test]
