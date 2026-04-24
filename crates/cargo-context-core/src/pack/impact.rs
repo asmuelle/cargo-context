@@ -157,10 +157,9 @@ pub(super) fn try_collect_per_finding(
     let (content, _report) = scrubber.scrub_file(&f.primary_path, &raw);
     let lang = f.language_hint();
 
-    let label = f
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("finding-{}", idx + 1));
+    let label =
+        f.id.clone()
+            .unwrap_or_else(|| format!("finding-{}", idx + 1));
     let descriptor = f.descriptor();
     let name = if descriptor.is_empty() {
         format!("📂 Impact: {label}")

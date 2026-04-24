@@ -14,8 +14,10 @@ pub mod impact;
 pub mod render;
 
 pub(crate) use render::lang_for_path;
-use render::{mk_section, project_name, render_diagnostics, render_diff_ordered,
-    render_entry, render_map, render_tests};
+use render::{
+    mk_section, project_name, render_diagnostics, render_diff_ordered, render_entry, render_map,
+    render_tests,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -308,8 +310,7 @@ impl PackBuilder {
                 ));
             }
         } else if !self.files_from.is_empty()
-            && let Some(content) =
-                impact::try_collect_scoped(&root, &self.files_from, &scrubber)
+            && let Some(content) = impact::try_collect_scoped(&root, &self.files_from, &scrubber)
         {
             candidates.push((
                 P_DIFF,
@@ -483,9 +484,9 @@ fn try_collect_entry(root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::impact::*;
     use super::render::lang_for_path;
+    use super::*;
 
     #[test]
     fn builder_includes_prompt_section() {
