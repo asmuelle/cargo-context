@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use cargo_context_core::{
-    Budget, Finding, PackBuilder, Preset, Tokenizer,
-    impact as impact_mod,
+    Budget, Finding, PackBuilder, Preset, Tokenizer, impact as impact_mod,
     scrub::{ScrubConfig, Scrubber},
 };
 use clap::Parser;

@@ -3,8 +3,8 @@ pub mod tools;
 
 use anyhow::Result;
 use rmcp::ServiceExt;
-use tools::CargoContextServer;
 use rmcp::transport::stdio;
+use tools::CargoContextServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

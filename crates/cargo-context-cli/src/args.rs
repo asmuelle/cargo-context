@@ -4,7 +4,11 @@ use cargo_context_core::{BudgetStrategy, ExpandMode, Format, Preset, Tokenizer};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "cargo-context", version, about = "High-fidelity context engineering for Rust AI workflows.")]
+#[command(
+    name = "cargo-context",
+    version,
+    about = "High-fidelity context engineering for Rust AI workflows."
+)]
 pub struct Args {
     #[command(subcommand)]
     pub cmd: Option<Command>,
