@@ -113,7 +113,7 @@ pub fn last_error(root: &Path) -> Result<Diagnostics> {
             "--color=never",
         ])
         .output()
-        .map_err(|e| Error::Config(format!("failed to spawn cargo: {e}")))?;
+        .map_err(|e| Error::Tool(format!("failed to spawn cargo: {e}")))?;
 
     let stream = String::from_utf8_lossy(&output.stdout);
     let diagnostics = parse_message_stream(&stream);

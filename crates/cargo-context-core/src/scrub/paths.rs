@@ -63,11 +63,10 @@ impl PathRules {
 fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
     for p in patterns {
-        let glob = Glob::new(p).map_err(|e| Error::Config(format!("invalid glob `{p}`: {e}")))?;
+        let glob = Glob::new(p).map_err(|e| Error::Glob(format!("invalid glob `{p}`: {e}")))?;
         b.add(glob);
     }
-    b.build()
-        .map_err(|e| Error::Config(format!("globset: {e}")))
+    b.build().map_err(|e| Error::Glob(format!("globset: {e}")))
 }
 
 #[cfg(test)]

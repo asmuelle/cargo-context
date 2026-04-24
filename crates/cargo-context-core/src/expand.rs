@@ -65,7 +65,7 @@ pub fn expand_file(workspace_root: &Path, crate_name: &str, file: &Path) -> Resu
         .arg("--color=never")
         .current_dir(workspace_root)
         .output()
-        .map_err(|e| Error::Config(format!("failed to spawn cargo-expand: {e}")))?;
+        .map_err(|e| Error::Tool(format!("failed to spawn cargo-expand: {e}")))?;
 
     if !output.status.success() {
         // Expansion failed (e.g. the crate doesn't compile). Fall through
