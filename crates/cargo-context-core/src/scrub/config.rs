@@ -56,6 +56,11 @@ pub struct ReportConfig {
     pub fail_on_match: bool,
     #[serde(default)]
     pub log_file: Option<std::path::PathBuf>,
+    /// Cap the scrub audit log to the most recent N entries. When set, the
+    /// log file is truncated after each write to retain only the newest
+    /// `max_entries` lines. `None` (default) means unbounded growth.
+    #[serde(default)]
+    pub max_entries: Option<usize>,
 }
 
 #[cfg(test)]

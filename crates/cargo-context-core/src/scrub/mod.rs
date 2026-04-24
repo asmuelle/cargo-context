@@ -319,6 +319,9 @@ impl Scrubber {
     /// Append each redaction to `report.log_file` as JSON Lines, if configured.
     /// Values are never written — only `rule_id`, `category`, `severity`, and
     /// the SHA-256 fingerprint (`hash4`). Timestamps are Unix epoch seconds.
+    ///
+    /// When `report.max_entries` is set, the log is truncated after writes to
+    /// retain only the most recent N entries.
     pub fn log_redactions(&self, report: &ScrubReport) -> Result<()> {
         let Some(path) = &self.report.log_file else {
             return Ok(());
@@ -326,12 +329,16 @@ impl Scrubber {
         if report.redactions.is_empty() {
             return Ok(());
         }
-        append_log_lines(path, &report.redactions)
+        append_log_lines(path, &report.redactions, self.report.max_entries)
     }
 }
 
-fn append_log_lines(path: &Path, redactions: &[Redaction]) -> Result<()> {
-    use std::io::Write;
+fn append_log_lines(
+    path: &Path,
+    redactions: &[Redaction],
+    max_entries: Option<usize>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -342,6 +349,7 @@ fn append_log_lines(path: &Path, redactions: &[Redaction]) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .read(true)
         .open(path)?;
 
     let ts = std::time::SystemTime::now()
@@ -360,6 +368,25 @@ fn append_log_lines(path: &Path, redactions: &[Redaction]) -> Result<()> {
         writeln!(file, "{line}")?;
     }
     file.flush()?;
+
+    if let Some(cap) = max_entries {
+        file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(&mut file);
+        let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
+        if lines.len() > cap {
+            let kept = &lines[lines.len() - cap..];
+            drop(file);
+            let mut new_file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)?;
+            for line in kept {
+                writeln!(new_file, "{line}")?;
+            }
+            new_file.flush()?;
+        }
+    }
+
     Ok(())
 }
 
