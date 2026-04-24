@@ -176,6 +176,7 @@ dependencies = [
  "clap",
  "serde_json",
  "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
