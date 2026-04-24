@@ -333,7 +333,11 @@ impl Scrubber {
     }
 }
 
-fn append_log_lines(path: &Path, redactions: &[Redaction], max_entries: Option<usize>) -> Result<()> {
+fn append_log_lines(
+    path: &Path,
+    redactions: &[Redaction],
+    max_entries: Option<usize>,
+) -> Result<()> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 
     if let Some(parent) = path.parent()
