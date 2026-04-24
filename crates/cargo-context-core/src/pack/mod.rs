@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{self, Budget, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS, Priority};
-use crate::collect::{self, Diagnostics, Diff, EntryPoints, RelatedTests, WorkspaceMap};
+use crate::collect::{self, Diff};
 use crate::error::Result;
 use crate::expand::{self, ExpandMode};
 use crate::impact::Finding;
