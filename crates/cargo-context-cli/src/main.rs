@@ -112,6 +112,9 @@ fn main() -> Result<()> {
     for p in args.exclude_paths {
         builder = builder.exclude_path(p);
     }
+    if let Some(range) = args.diff {
+        builder = builder.diff_range(range);
+    }
 
     if !stdin_claimed {
         let stdin = std::io::stdin();

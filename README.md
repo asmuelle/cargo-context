@@ -116,6 +116,9 @@ cargo context --impact-scope impact.json --min-confidence 0.8
 cargo context --impact-scope impact.json --exclude-ids f-aaaa,f-bbbb
 cargo context --impact-scope impact.json --per-finding
 
+# Compare a specific Git range instead of the working tree against HEAD.
+cargo context --fix --diff HEAD~3..HEAD
+
 # Validate the scrubber config without building a pack
 cargo context scrub --check
 ```
@@ -131,6 +134,7 @@ cargo context scrub --check
 | `--tokenizer <…>` | `llama3` | `llama3` / `llama2` / `tiktoken-cl100k` / `tiktoken-o200k` / `claude` / `chars-div4`. |
 | `--hf-llama3-vocab <PATH>` | — | Exact counting via a local HuggingFace `tokenizer.json`. Overrides `--tokenizer`. |
 | `--expand-macros <off\|auto\|on>` | `off` | Run `cargo-expand` and include expanded source. Auto fires when the diff has `.rs` files. |
+| `--diff <RANGE>` | `HEAD` working tree | Use an explicit Git diff range, e.g. `HEAD~3..HEAD`. |
 | `-f, --format <markdown\|xml\|json\|plain>` | `markdown` | Output format. Use `xml` for Claude, `json` for programmatic consumers. |
 | `--files-from <PATH\|->` | — | Newline-delimited repo-relative paths to embed in a "📂 Scoped Files" section. `-` reads stdin. |
 | `--impact-scope <PATH\|->` | — | Consume a `cargo-impact --format=json` envelope. Findings are filtered, sorted by confidence desc, and rendered as a "📂 Scoped Files" section. `-` reads stdin. Conflicts with `--files-from`. |

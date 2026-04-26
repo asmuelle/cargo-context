@@ -77,6 +77,20 @@ fn run_stdin(cwd: &std::path::Path, args: &[&str], stdin: &str) -> String {
     String::from_utf8(output.stdout).expect("utf-8 stdout")
 }
 
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 const ENVELOPE: &str = r#"{
     "version": "0.3.0",
     "findings": [
@@ -346,4 +360,66 @@ fn exclude_path_filters_impact_scope_files() {
         "excluded impact file leaked:\n{out}"
     );
     assert!(out.contains("README"));
+}
+
+#[test]
+fn diff_range_uses_requested_git_range() {
+    let (tmp, _envelope) = scaffold(&["src/first.rs"], ENVELOPE);
+    git(tmp.path(), &["init"]);
+    git(tmp.path(), &["add", "."]);
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-m",
+            "first",
+        ],
+    );
+
+    std::fs::write(
+        tmp.path().join("src/first.rs"),
+        "// src/first.rs\npub fn first_changed() {}\n",
+    )
+    .expect("modify first");
+    git(tmp.path(), &["add", "."]);
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-m",
+            "second",
+        ],
+    );
+
+    let second_commit = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf-8 sha");
+
+    std::fs::write(
+        tmp.path().join("src/first.rs"),
+        "// src/first.rs\npub fn worktree_change() {}\n",
+    )
+    .expect("modify worktree");
+
+    let out = run(tmp.path(), &["--preset", "fix", "--diff", "HEAD~1..HEAD"]);
+
+    assert!(out.contains("first_changed"), "range diff missing:\n{out}");
+    assert!(
+        !out.contains("worktree_change"),
+        "working tree diff leaked into explicit range from {second_commit}:\n{out}"
+    );
 }

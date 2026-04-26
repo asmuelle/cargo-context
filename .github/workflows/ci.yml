@@ -85,11 +85,19 @@ jobs:
           command: check
           arguments: --all-features
 
+  release-version:
+    name: release version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/qa/verify_release_version.sh
+
   # Aggregator job so branch protection can require a single "ci" status.
   ci:
     name: ci
     if: always()
-    needs: [fmt, clippy, test, doc, msrv, deny]
+    needs: [fmt, clippy, test, doc, msrv, deny, release-version]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs succeeded
@@ -99,7 +107,8 @@ jobs:
             || [ "${{ needs.test.result }}" != "success" ] \
             || [ "${{ needs.doc.result }}" != "success" ] \
             || [ "${{ needs.msrv.result }}" != "success" ] \
-            || [ "${{ needs.deny.result }}" != "success" ]; then
+            || [ "${{ needs.deny.result }}" != "success" ] \
+            || [ "${{ needs.release-version.result }}" != "success" ]; then
             echo "One or more required jobs failed."
             exit 1
           fi

@@ -92,10 +92,12 @@ No `Co-authored-by` trailers, no `Signed-off-by` required. Squash-merge is the d
 ## Release process
 
 1. Bump workspace version in `Cargo.toml` (`[workspace.package] version = "x.y.z"`).
-2. Update `CHANGELOG.md` (if/when one exists).
-3. Tag: `git tag vx.y.z && git push --tags`.
-4. The `release.yml` workflow builds cross-platform binaries and opens a GitHub release with auto-generated notes.
-5. Publish to crates.io (maintainer only): `cargo publish -p cargo-context-core` → `-p cargo-context-scrub` → `-p cargo-context-cli` → `-p cargo-context-mcp`.
+2. Update `CHANGELOG.md` with a `## [x.y.z] - YYYY-MM-DD` entry.
+3. Run `scripts/qa/verify_release_version.sh` to verify crate versions and changelog agree.
+4. Commit the release prep, then tag the commit: `git tag vx.y.z && git push origin main --tags`.
+5. The `release.yml` workflow builds cross-platform binaries, opens the GitHub release, and publishes crates.io packages in dependency order: `core` → `scrub` → `cli` → `mcp`.
+
+Do not publish from a local workstation. crates.io publishing is intentionally centralized in GitHub Actions so dry-runs, tag/version checks, provenance, and post-publish verification happen consistently.
 
 Prerelease tags (e.g. `v0.2.0-rc1`) are automatically marked `prerelease: true`.
 

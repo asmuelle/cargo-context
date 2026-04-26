@@ -124,6 +124,7 @@ pub struct PackBuilder {
     expand_mode: ExpandMode,
     include_paths: Vec<String>,
     exclude_paths: Vec<String>,
+    diff_range: Option<String>,
     project_root: Option<std::path::PathBuf>,
     stdin_prompt: Option<String>,
     files_from: Vec<std::path::PathBuf>,
@@ -141,6 +142,7 @@ impl Default for PackBuilder {
             expand_mode: ExpandMode::default(),
             include_paths: Vec::new(),
             exclude_paths: Vec::new(),
+            diff_range: None,
             project_root: None,
             stdin_prompt: None,
             files_from: Vec::new(),
@@ -189,6 +191,10 @@ impl PackBuilder {
     }
     pub fn exclude_path(mut self, path: impl Into<String>) -> Self {
         self.exclude_paths.push(path.into());
+        self
+    }
+    pub fn diff_range(mut self, range: impl Into<String>) -> Self {
+        self.diff_range = Some(range.into());
         self
     }
     pub fn project_root(mut self, p: impl Into<std::path::PathBuf>) -> Self {
@@ -265,7 +271,7 @@ impl PackBuilder {
         }
 
         let diff = if wants.diff || wants.tests {
-            collect::git_diff(&root, None)
+            collect::git_diff(&root, self.diff_range.as_deref())
                 .ok()
                 .map(|d| path_filters.filter_diff(d))
         } else {

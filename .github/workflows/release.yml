@@ -16,9 +16,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag, crate versions, and changelog agree
+        run: scripts/qa/verify_release_version.sh
+
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +112,24 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
 
+  verify-github-release:
+    name: verify GitHub release assets
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Verify release assets are attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          count="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')"
+          if [ "$count" -lt 5 ]; then
+            echo "expected at least 5 release assets for $GITHUB_REF_NAME, found $count" >&2
+            exit 1
+          fi
+          echo "GitHub release $GITHUB_REF_NAME has $count asset(s)." >> "$GITHUB_STEP_SUMMARY"
+
   # Publish the four workspace crates to crates.io in dependency order.
   # Gated on tag pushes only so a manual `workflow_dispatch` run can still
   # produce GitHub-release artifacts without touching the registry.
@@ -111,7 +141,7 @@ jobs:
   publish:
     name: publish to crates.io
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate, build, verify-github-release]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v6
@@ -120,28 +150,66 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Publish cargo-context-core
-        run: cargo publish -p cargo-context-core --locked
+      - name: Publish crates in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+
+          crate_published() {
+            local crate="$1"
+            curl -fsSL "https://crates.io/api/v1/crates/${crate}" \
+              | jq -e --arg version "$version" '.versions[] | select(.num == $version)' >/dev/null
+          }
+
+          publish_if_missing() {
+            local crate="$1"
+            if crate_published "$crate"; then
+              echo "$crate $version is already published; skipping."
+              return 0
+            fi
+            cargo publish -p "$crate" --locked --dry-run
+            cargo publish -p "$crate" --locked
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            for attempt in {1..20}; do
+              if crate_published "$crate"; then
+                echo "$crate $version is visible on crates.io."
+                return 0
+              fi
+              echo "waiting for $crate $version to appear on crates.io (attempt $attempt/20)"
+              sleep 15
+            done
+            echo "$crate $version did not appear on crates.io in time" >&2
+            return 1
+          }
+
+          publish_if_missing cargo-context-core
+          wait_for_crate cargo-context-core
+
+          publish_if_missing cargo-context-scrub
+          wait_for_crate cargo-context-scrub
+
+          publish_if_missing cargo-context-cli
+          wait_for_crate cargo-context-cli
+
+          publish_if_missing cargo-context-mcp
+          wait_for_crate cargo-context-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      # Index propagation: the dependents below pin cargo-context-core by
-      # version, so crates.io must see the new core release before their
-      # publish step runs. ~30s is the de-facto Rust-ecosystem wait.
-      - name: Wait for crates.io index to propagate core
-        run: sleep 30
-
-      - name: Publish cargo-context-scrub
-        run: cargo publish -p cargo-context-scrub --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish cargo-context-cli
-        run: cargo publish -p cargo-context-cli --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish cargo-context-mcp
-        run: cargo publish -p cargo-context-mcp --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Release summary
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "## crates.io publish"
+            echo ""
+            echo "Published or verified version \`$version\` for:"
+            echo "- cargo-context-core"
+            echo "- cargo-context-scrub"
+            echo "- cargo-context-cli"
+            echo "- cargo-context-mcp"
+          } >> "$GITHUB_STEP_SUMMARY"

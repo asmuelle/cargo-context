@@ -43,6 +43,9 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = ExpandModeArg::Off)]
     pub expand_macros: ExpandModeArg,
 
+    #[arg(long, value_name = "RANGE")]
+    pub diff: Option<String>,
+
     #[arg(long)]
     pub no_scrub: bool,
 

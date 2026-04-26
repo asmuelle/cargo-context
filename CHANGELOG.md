@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- CLI `--diff <RANGE>` support for explicit Git ranges, matching the MCP
+  `get_diff` capability.
+- Release version guard for CI/release workflows to ensure tags, crate
+  versions, and changelog entries agree.
+
+### Changed
+
+- Release publishing is documented and enforced as GitHub Actions-only, with
+  crates.io dry-runs, idempotent publish checks, and post-publish verification
+  in dependency order.
+
 ## [0.2.0] - 2026-04-24
 
 ### Added
