@@ -330,6 +330,14 @@ fn include_path_force_adds_matching_files_and_expands_globs() {
         out.contains("Included Paths"),
         "include section missing:\n{out}"
     );
+    assert!(
+        out.contains("Scope Filters"),
+        "scope filter note missing:\n{out}"
+    );
+    assert!(
+        out.contains("Excluded by `--exclude-path`"),
+        "exclude count missing:\n{out}"
+    );
     assert!(out.contains("crates/a/src/lib.rs"));
     assert!(
         !out.contains("crates/b/src/lib.rs"),
@@ -356,7 +364,7 @@ fn exclude_path_filters_impact_scope_files() {
 
     assert!(out.contains("src/hot.rs"));
     assert!(
-        !out.contains("src/warm.rs"),
+        !out.contains("### `src/warm.rs`"),
         "excluded impact file leaked:\n{out}"
     );
     assert!(out.contains("README"));

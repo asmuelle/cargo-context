@@ -193,6 +193,13 @@ impl PackBuilder {
         self.exclude_paths.push(path.into());
         self
     }
+
+    /// Use an explicit Git diff range when collecting the Intent section.
+    ///
+    /// By default packs use the working tree and index diff against `HEAD`.
+    /// Passing a range such as `HEAD~3..HEAD` makes the diff collector use
+    /// that range instead; related-test discovery is seeded from the same
+    /// filtered diff.
     pub fn diff_range(mut self, range: impl Into<String>) -> Self {
         self.diff_range = Some(range.into());
         self
@@ -244,6 +251,7 @@ impl PackBuilder {
 
         let wants = SectionWants::for_preset(self.preset);
         let path_filters = UserPathFilters::new(&self.include_paths, &self.exclude_paths)?;
+        let mut filter_report = ScopeFilterReport::new(&path_filters);
 
         let diagnostics = if wants.errors {
             collect::last_error(&root).ok()
@@ -273,7 +281,14 @@ impl PackBuilder {
         let diff = if wants.diff || wants.tests {
             collect::git_diff(&root, self.diff_range.as_deref())
                 .ok()
-                .map(|d| path_filters.filter_diff(d))
+                .map(|d| {
+                    filter_report.diff_files_excluded += d
+                        .files
+                        .iter()
+                        .filter(|f| !path_filters.allows(&f.path))
+                        .count();
+                    path_filters.filter_diff(d)
+                })
         } else {
             None
         };
@@ -307,9 +322,22 @@ impl PackBuilder {
                 mk_section("🧭 Entry Points", &content, &self.tokenizer),
             ));
         }
+        filter_report.scoped_files_excluded += self
+            .files_from
+            .iter()
+            .filter(|p| !path_filters.allows(p))
+            .count();
         let files_from = path_filters.filter_paths(self.files_from);
+        filter_report.impact_findings_excluded += self
+            .impact_findings
+            .iter()
+            .filter(|f| !path_filters.allows(&f.primary_path))
+            .count();
         let impact_findings = path_filters.filter_findings(self.impact_findings);
-        let force_include_paths = path_filters.force_include_paths(&root);
+        let force_include = path_filters.force_include_paths(&root);
+        filter_report.include_patterns_unmatched = force_include.unmatched_patterns;
+        filter_report.include_paths_excluded = force_include.excluded_matches;
+        let force_include_paths = force_include.paths;
 
         if !impact_findings.is_empty() {
             if self.impact_per_finding {
@@ -370,6 +398,12 @@ impl PackBuilder {
             candidates.push((
                 P_ENTRY,
                 mk_section("🔍 Expanded Macros", &content, &self.tokenizer),
+            ));
+        }
+        if let Some(content) = filter_report.render() {
+            candidates.push((
+                P_MAP,
+                mk_section("🔎 Scope Filters", &content, &self.tokenizer),
             ));
         }
 
@@ -524,6 +558,7 @@ fn try_collect_entry(root: &Path, path_filters: &UserPathFilters) -> Option<Stri
 #[derive(Debug, Default)]
 struct UserPathFilters {
     include_paths: Vec<String>,
+    exclude_paths: Vec<String>,
     exclude: Option<GlobSet>,
 }
 
@@ -531,6 +566,7 @@ impl UserPathFilters {
     fn new(include_paths: &[String], exclude_paths: &[String]) -> Result<Self> {
         Ok(Self {
             include_paths: include_paths.to_vec(),
+            exclude_paths: exclude_paths.to_vec(),
             exclude: build_globset(exclude_paths)?,
         })
     }
@@ -562,9 +598,11 @@ impl UserPathFilters {
         diff
     }
 
-    fn force_include_paths(&self, root: &Path) -> Vec<PathBuf> {
+    fn force_include_paths(&self, root: &Path) -> ForceIncludeResult {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut unmatched = Vec::new();
+        let mut excluded_matches = 0_usize;
         for pattern in &self.include_paths {
             if is_glob_pattern(pattern) {
                 let Ok(glob) = Glob::new(pattern) else {
@@ -575,15 +613,28 @@ impl UserPathFilters {
                 let Ok(set) = builder.build() else {
                     continue;
                 };
-                self.collect_matching_files(root, root, &set, &mut seen, &mut out);
+                let before = out.len();
+                excluded_matches +=
+                    self.collect_matching_files(root, root, &set, &mut seen, &mut out);
+                if out.len() == before {
+                    unmatched.push(pattern.clone());
+                }
             } else {
                 let path = PathBuf::from(pattern);
-                if self.allows(&path) && seen.insert(path.clone()) {
-                    out.push(path);
+                if self.allows(&path) {
+                    if seen.insert(path.clone()) {
+                        out.push(path);
+                    }
+                } else {
+                    excluded_matches += 1;
                 }
             }
         }
-        out
+        ForceIncludeResult {
+            paths: out,
+            unmatched_patterns: unmatched,
+            excluded_matches,
+        }
     }
 
     fn collect_matching_files(
@@ -593,10 +644,11 @@ impl UserPathFilters {
         glob: &GlobSet,
         seen: &mut std::collections::HashSet<PathBuf>,
         out: &mut Vec<PathBuf>,
-    ) {
+    ) -> usize {
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+            return 0;
         };
+        let mut excluded = 0_usize;
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -606,17 +658,103 @@ impl UserPathFilters {
                 continue;
             }
             if path.is_dir() {
-                self.collect_matching_files(root, &path, glob, seen, out);
+                excluded += self.collect_matching_files(root, &path, glob, seen, out);
                 continue;
             }
             if !path.is_file() {
                 continue;
             }
             let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-            if glob.is_match(&rel) && self.allows(&rel) && seen.insert(rel.clone()) {
-                out.push(rel);
+            if glob.is_match(&rel) {
+                if self.allows(&rel) {
+                    if seen.insert(rel.clone()) {
+                        out.push(rel);
+                    }
+                } else {
+                    excluded += 1;
+                }
             }
         }
+        excluded
+    }
+}
+
+#[derive(Debug, Default)]
+struct ForceIncludeResult {
+    paths: Vec<PathBuf>,
+    unmatched_patterns: Vec<String>,
+    excluded_matches: usize,
+}
+
+#[derive(Debug, Default)]
+struct ScopeFilterReport {
+    include_patterns: Vec<String>,
+    exclude_patterns: Vec<String>,
+    diff_files_excluded: usize,
+    scoped_files_excluded: usize,
+    impact_findings_excluded: usize,
+    include_paths_excluded: usize,
+    include_patterns_unmatched: Vec<String>,
+}
+
+impl ScopeFilterReport {
+    fn new(filters: &UserPathFilters) -> Self {
+        Self {
+            include_patterns: filters.include_paths.clone(),
+            exclude_patterns: filters.exclude_paths.clone(),
+            ..Self::default()
+        }
+    }
+
+    fn render(&self) -> Option<String> {
+        if self.include_patterns.is_empty() && self.exclude_patterns.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        if !self.include_patterns.is_empty() {
+            out.push_str(&format!(
+                "- Include patterns: `{}`\n",
+                self.include_patterns.join("`, `")
+            ));
+        }
+        if !self.exclude_patterns.is_empty() {
+            out.push_str(&format!(
+                "- Exclude patterns: `{}`\n",
+                self.exclude_patterns.join("`, `")
+            ));
+        }
+
+        let total_excluded = self.diff_files_excluded
+            + self.scoped_files_excluded
+            + self.impact_findings_excluded
+            + self.include_paths_excluded;
+        if total_excluded > 0 {
+            out.push_str(&format!(
+                "- Excluded by `--exclude-path`: {total_excluded} candidate(s)"
+            ));
+            let details = [
+                ("diff", self.diff_files_excluded),
+                ("scoped", self.scoped_files_excluded),
+                ("impact", self.impact_findings_excluded),
+                ("include", self.include_paths_excluded),
+            ]
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(label, count)| format!("{label}:{count}"))
+            .collect::<Vec<_>>();
+            if !details.is_empty() {
+                out.push_str(&format!(" ({})", details.join(", ")));
+            }
+            out.push('\n');
+        }
+        if !self.include_patterns_unmatched.is_empty() {
+            out.push_str(&format!(
+                "- Include patterns with no included files: `{}`\n",
+                self.include_patterns_unmatched.join("`, `")
+            ));
+        }
+
+        Some(out)
     }
 }
 
@@ -710,7 +848,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            filters.force_include_paths(Path::new(".")),
+            filters.force_include_paths(Path::new(".")).paths,
             vec![std::path::PathBuf::from("src/lib.rs")]
         );
     }
@@ -725,9 +863,27 @@ mod tests {
             UserPathFilters::new(&["src/*.rs".to_string()], &["**/secret.rs".to_string()]).unwrap();
 
         assert_eq!(
-            filters.force_include_paths(tmp.path()),
+            filters.force_include_paths(tmp.path()).paths,
             vec![std::path::PathBuf::from("src/lib.rs")]
         );
+    }
+
+    #[test]
+    fn scope_filter_report_surfaces_excluded_candidates() {
+        let filters =
+            UserPathFilters::new(&["src/*.rs".to_string()], &["**/secret.rs".to_string()]).unwrap();
+        let mut report = ScopeFilterReport::new(&filters);
+        report.diff_files_excluded = 1;
+        report.include_paths_excluded = 1;
+        report.include_patterns_unmatched = vec!["missing/*.rs".to_string()];
+
+        let rendered = report.render().unwrap();
+
+        assert!(rendered.contains("Exclude patterns"));
+        assert!(rendered.contains("Excluded by `--exclude-path`: 2 candidate(s)"));
+        assert!(rendered.contains("diff:1"));
+        assert!(rendered.contains("include:1"));
+        assert!(rendered.contains("missing/*.rs"));
     }
 
     #[test]

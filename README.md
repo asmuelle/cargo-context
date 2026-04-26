@@ -119,6 +119,10 @@ cargo context --impact-scope impact.json --per-finding
 # Compare a specific Git range instead of the working tree against HEAD.
 cargo context --fix --diff HEAD~3..HEAD
 
+# Force in a focused API surface; exclude wins if both flags match.
+cargo context --feature --include-path 'crates/**/src/lib.rs'
+cargo context --feature --include-path 'crates/**/src/lib.rs' --exclude-path 'crates/legacy/**'
+
 # Validate the scrubber config without building a pack
 cargo context scrub --check
 ```
@@ -143,6 +147,8 @@ cargo context scrub --check
 | `--exclude-ids <IDS>` | — | Comma-separated finding ids to skip (e.g. `f-aaaa,f-bbbb`). Requires `--impact-scope`. |
 | `--include-path <GLOB>` | — | Force-include matching files in a separate "📌 Included Paths" section (repeatable). |
 | `--exclude-path <GLOB>` | — | Suppress matching files from diff/scoped/impact/entry/expanded/test context. Exclude wins over include. |
+
+When include/exclude controls are active, the pack includes a small "🔎 Scope Filters" section summarizing active patterns and how many candidates were suppressed.
 
 ### 3.3 Scrubber flags
 

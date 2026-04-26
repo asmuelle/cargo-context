@@ -21,7 +21,7 @@ for crate in cargo-context-core cargo-context-scrub cargo-context-cli cargo-cont
   fi
 done
 
-if ! rg -q "^## \\[$version\\]" CHANGELOG.md; then
+if ! grep -Eq "^## \\[$version\\]" CHANGELOG.md; then
   echo "CHANGELOG.md is missing an entry for $version" >&2
   exit 1
 fi
