@@ -10,7 +10,9 @@ use rmcp::{
     service::RequestContext,
 };
 
-use crate::tools::CargoContextServer;
+use crate::tools::{
+    CargoContextServer, scrubbed_diff_json, scrubbed_errors_json, scrubbed_map_json,
+};
 impl ServerHandler for CargoContextServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -76,24 +78,12 @@ impl ServerHandler for CargoContextServer {
             std::env::current_dir().map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let json = match uri {
-            "cargo-context://diff" => {
-                let d = cargo_context_core::collect::git_diff(&root, None)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                serde_json::to_string_pretty(&d)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            }
-            "cargo-context://errors" => {
-                let d = cargo_context_core::collect::last_error(&root)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                serde_json::to_string_pretty(&d)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            }
-            "cargo-context://map" => {
-                let m = cargo_context_core::collect::cargo_metadata(&root)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                serde_json::to_string_pretty(&m)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            }
+            "cargo-context://diff" => scrubbed_diff_json(&root, None)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            "cargo-context://errors" => scrubbed_errors_json(&root)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            "cargo-context://map" => scrubbed_map_json(&root)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
             other => {
                 return Err(McpError::resource_not_found(
                     format!("unknown resource URI: {other}"),

@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{self, Budget, P_DIFF, P_ENTRY, P_ERROR, P_EXEMPT, P_MAP, P_TESTS, Priority};
 use crate::collect::{self, Diff};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expand::{self, ExpandMode};
 use crate::impact::Finding;
 use crate::scrub::Scrubber;
@@ -236,6 +237,7 @@ impl PackBuilder {
         }
 
         let wants = SectionWants::for_preset(self.preset);
+        let path_filters = UserPathFilters::new(&self.include_paths, &self.exclude_paths)?;
 
         let diagnostics = if wants.errors {
             collect::last_error(&root).ok()
@@ -246,6 +248,11 @@ impl PackBuilder {
             .as_ref()
             .map(|d| d.referenced_files())
             .unwrap_or_default();
+        let visible_error_files: Vec<std::path::PathBuf> = error_files
+            .iter()
+            .filter(|p| path_filters.allows(p))
+            .cloned()
+            .collect();
 
         if let Some(d) = diagnostics.as_ref()
             && !d.is_empty()
@@ -258,7 +265,9 @@ impl PackBuilder {
         }
 
         let diff = if wants.diff || wants.tests {
-            collect::git_diff(&root, None).ok()
+            collect::git_diff(&root, None)
+                .ok()
+                .map(|d| path_filters.filter_diff(d))
         } else {
             None
         };
@@ -271,7 +280,7 @@ impl PackBuilder {
                 P_DIFF,
                 mk_section(
                     "⚡ Intent (Git Diff)",
-                    &render_diff_ordered(d, &error_files, &scrubber),
+                    &render_diff_ordered(d, &visible_error_files, &scrubber),
                     &self.tokenizer,
                 ),
             ));
@@ -285,16 +294,20 @@ impl PackBuilder {
             ));
         }
         if wants.entry
-            && let Some(content) = try_collect_entry(&root)
+            && let Some(content) = try_collect_entry(&root, &path_filters)
         {
             candidates.push((
                 P_ENTRY,
                 mk_section("🧭 Entry Points", &content, &self.tokenizer),
             ));
         }
-        if !self.impact_findings.is_empty() {
+        let files_from = path_filters.filter_paths(self.files_from);
+        let impact_findings = path_filters.filter_findings(self.impact_findings);
+        let force_include_paths = path_filters.force_include_paths(&root);
+
+        if !impact_findings.is_empty() {
             if self.impact_per_finding {
-                for (idx, f) in self.impact_findings.iter().enumerate() {
+                for (idx, f) in impact_findings.iter().enumerate() {
                     if let Some((name, body)) =
                         impact::try_collect_per_finding(&root, f, idx, &scrubber)
                     {
@@ -302,19 +315,28 @@ impl PackBuilder {
                     }
                 }
             } else if let Some(content) =
-                impact::try_collect_scoped_findings(&root, &self.impact_findings, &scrubber)
+                impact::try_collect_scoped_findings(&root, &impact_findings, &scrubber)
             {
                 candidates.push((
                     P_DIFF,
                     mk_section("📂 Scoped Files", &content, &self.tokenizer),
                 ));
             }
-        } else if !self.files_from.is_empty()
-            && let Some(content) = impact::try_collect_scoped(&root, &self.files_from, &scrubber)
+        } else if !files_from.is_empty()
+            && let Some(content) = impact::try_collect_scoped(&root, &files_from, &scrubber)
         {
             candidates.push((
                 P_DIFF,
                 mk_section("📂 Scoped Files", &content, &self.tokenizer),
+            ));
+        }
+        if !force_include_paths.is_empty()
+            && let Some(content) =
+                impact::try_collect_scoped(&root, &force_include_paths, &scrubber)
+        {
+            candidates.push((
+                P_DIFF,
+                mk_section("📌 Included Paths", &content, &self.tokenizer),
             ));
         }
 
@@ -323,8 +345,9 @@ impl PackBuilder {
                 .as_ref()
                 .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
                 .unwrap_or_default();
-            changed.extend(self.files_from.iter().cloned());
-            changed.extend(self.impact_findings.iter().map(|f| f.primary_path.clone()));
+            changed.extend(files_from.iter().cloned());
+            changed.extend(impact_findings.iter().map(|f| f.primary_path.clone()));
+            changed.extend(force_include_paths.iter().cloned());
             if !changed.is_empty()
                 && let Some(content) = try_collect_tests(&root, &changed)
             {
@@ -335,7 +358,8 @@ impl PackBuilder {
             }
         }
         if self.expand_mode != ExpandMode::Off
-            && let Some(content) = try_collect_expansion(&root, self.expand_mode, diff.as_ref())
+            && let Some(content) =
+                try_collect_expansion(&root, self.expand_mode, diff.as_ref(), &path_filters)
         {
             candidates.push((
                 P_ENTRY,
@@ -410,7 +434,12 @@ fn try_collect_map(root: &Path) -> Option<String> {
     collect::cargo_metadata(root).ok().map(render_map)
 }
 
-fn try_collect_expansion(root: &Path, mode: ExpandMode, diff: Option<&Diff>) -> Option<String> {
+fn try_collect_expansion(
+    root: &Path,
+    mode: ExpandMode,
+    diff: Option<&Diff>,
+    path_filters: &UserPathFilters,
+) -> Option<String> {
     if matches!(mode, ExpandMode::Off) {
         return None;
     }
@@ -448,6 +477,9 @@ fn try_collect_expansion(root: &Path, mode: ExpandMode, diff: Option<&Diff>) -> 
         } else {
             continue;
         };
+        if !path_filters.allows(&target) {
+            continue;
+        }
         match expand::expand_file(&meta.workspace_root, &member.name, &target) {
             Ok(Some(text)) => {
                 out.push_str(&format!(
@@ -473,13 +505,133 @@ fn try_collect_tests(root: &Path, changed: &[std::path::PathBuf]) -> Option<Stri
     }
 }
 
-fn try_collect_entry(root: &Path) -> Option<String> {
-    let ep = collect::entry_points(root).ok()?;
+fn try_collect_entry(root: &Path, path_filters: &UserPathFilters) -> Option<String> {
+    let mut ep = collect::entry_points(root).ok()?;
+    ep.files.retain(|f| path_filters.allows(&f.path));
     if ep.is_empty() {
         None
     } else {
         Some(render_entry(&ep))
     }
+}
+
+#[derive(Debug, Default)]
+struct UserPathFilters {
+    include_paths: Vec<String>,
+    exclude: Option<GlobSet>,
+}
+
+impl UserPathFilters {
+    fn new(include_paths: &[String], exclude_paths: &[String]) -> Result<Self> {
+        Ok(Self {
+            include_paths: include_paths.to_vec(),
+            exclude: build_globset(exclude_paths)?,
+        })
+    }
+
+    fn allows(&self, path: &Path) -> bool {
+        !self.matches_exclude(path)
+    }
+
+    fn matches_exclude(&self, path: &Path) -> bool {
+        self.exclude
+            .as_ref()
+            .map(|gs| gs.is_match(path))
+            .unwrap_or(false)
+    }
+
+    fn filter_paths(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.into_iter().filter(|p| self.allows(p)).collect()
+    }
+
+    fn filter_findings(&self, findings: Vec<Finding>) -> Vec<Finding> {
+        findings
+            .into_iter()
+            .filter(|f| self.allows(&f.primary_path))
+            .collect()
+    }
+
+    fn filter_diff(&self, mut diff: Diff) -> Diff {
+        diff.files.retain(|f| self.allows(&f.path));
+        diff
+    }
+
+    fn force_include_paths(&self, root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pattern in &self.include_paths {
+            if is_glob_pattern(pattern) {
+                let Ok(glob) = Glob::new(pattern) else {
+                    continue;
+                };
+                let mut builder = GlobSetBuilder::new();
+                builder.add(glob);
+                let Ok(set) = builder.build() else {
+                    continue;
+                };
+                self.collect_matching_files(root, root, &set, &mut seen, &mut out);
+            } else {
+                let path = PathBuf::from(pattern);
+                if self.allows(&path) && seen.insert(path.clone()) {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_matching_files(
+        &self,
+        root: &Path,
+        dir: &Path,
+        glob: &GlobSet,
+        seen: &mut std::collections::HashSet<PathBuf>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name == ".git" || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                self.collect_matching_files(root, &path, glob, seen, out);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            if glob.is_match(&rel) && self.allows(&rel) && seen.insert(rel.clone()) {
+                out.push(rel);
+            }
+        }
+    }
+}
+
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
+}
+
+fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern)
+            .map_err(|e| Error::Glob(format!("invalid glob `{pattern}`: {e}")))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|e| Error::Glob(format!("globset: {e}")))
 }
 
 #[cfg(test)]
@@ -509,6 +661,67 @@ mod tests {
             .build()
             .expect("build pack");
         assert_eq!(pack.schema, "cargo-context/v1");
+    }
+
+    #[test]
+    fn user_path_filters_exclude_diff_files() {
+        let filters = UserPathFilters::new(&[], &["**/secret.rs".to_string()]).unwrap();
+        let diff = Diff {
+            range: None,
+            files: vec![
+                crate::collect::FileDiff {
+                    path: std::path::PathBuf::from("src/lib.rs"),
+                    old_path: None,
+                    status: crate::collect::FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+                crate::collect::FileDiff {
+                    path: std::path::PathBuf::from("src/secret.rs"),
+                    old_path: None,
+                    status: crate::collect::FileStatus::Modified,
+                    hunks: Vec::new(),
+                    binary: false,
+                },
+            ],
+        };
+
+        let filtered = filters.filter_diff(diff);
+
+        assert_eq!(filtered.files.len(), 1);
+        assert_eq!(
+            filtered.files[0].path,
+            std::path::PathBuf::from("src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn include_paths_force_scope_unless_excluded() {
+        let filters = UserPathFilters::new(
+            &["src/lib.rs".to_string(), "src/secret.rs".to_string()],
+            &["**/secret.rs".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            filters.force_include_paths(Path::new(".")),
+            vec![std::path::PathBuf::from("src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn include_paths_expand_globs_from_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("src/secret.rs"), "").unwrap();
+        let filters =
+            UserPathFilters::new(&["src/*.rs".to_string()], &["**/secret.rs".to_string()]).unwrap();
+
+        assert_eq!(
+            filters.force_include_paths(tmp.path()),
+            vec![std::path::PathBuf::from("src/lib.rs")]
+        );
     }
 
     #[test]

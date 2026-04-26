@@ -36,7 +36,7 @@ What's implemented and shipping today:
 | **MCP server** — `cargo-context-mcp` binary on the official `rmcp` SDK; four tools | ✅ |
 | **CLI** — `cargo context [pack flags]` and `cargo context scrub --check`; `--files-from <PATH\|->` and `--impact-scope <PATH\|->` for cargo-impact interop; `--scrub-report` / `--strict-scrub` for CI | ✅ |
 | **Output formats** — markdown / xml / json / plain | ✅ |
-| **MCP resources & prompts** | 🚧 (only tools today) |
+| **MCP resources & prompts** — diff/errors/map resources and `fix_compiler_error` prompt | ✅ |
 | **`--impact-scope` JSON envelope** ([#5](https://github.com/asmuelle/cargo-context/issues/5)) — confidence-sorted Scoped Files, `--min-confidence`, `--per-finding`, `--exclude-ids`, kind-aware language hints | ✅ |
 
 ## 1. Core Philosophy
@@ -52,16 +52,16 @@ The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An
 ## 2. Technical Feature Set
 
 ### A. The "Symptom" Capture (Error Integration)
-`cargo-context` will wrap `cargo check` or `cargo test`.
-*   **Mechanism:** It captures `stderr` from the compiler.
+`cargo-context` captures the current compiler state from `cargo check`.
+*   **Mechanism:** It consumes Cargo's JSON diagnostic stream and extracts compiler messages.
 *   **Contextualization:** It doesn't just dump the error; it extracts the specific file paths and line numbers mentioned in the error and automatically adds those files to the context pack.
-*   **Flag:** `--last-error` (Captures the most recent failed build output).
+*   **Workflow:** Use `cargo context --fix` to combine diagnostics, diff, and related tests.
 
 ### B. The "Intent" Capture (Git Integration)
 Instead of the whole file, it focuses on the *evolution*.
 *   **Mechanism:** Parses `git diff` (staged and unstaged).
 *   **Vibe Optimization:** If a file has a massive diff, it provides a "summary" of the file and the specific changed chunks rather than the whole file, preventing token overflow.
-*   **Flag:** `--diff [branch/commit]` (Specify the delta range).
+*   **Workflow:** The CLI captures the working tree diff against `HEAD`; the MCP `get_diff` tool also accepts an optional ref range.
 
 ### C. The "Map" Capture (Metadata Integration)
 Provides the AI with the architectural constraints.
@@ -187,7 +187,7 @@ The output is a structured document. `cargo-context` is **model-agnostic** — i
 | `json` | Programmatic consumers (MCP, scripts) | Schema versioned via `"schema": "cargo-context/v1"` |
 | `plain` | Raw concatenation | No structural markers — for models that dislike markup noise |
 
-Format selection is orthogonal to model choice. A flag `--target=<claude|openai|llama|generic>` picks tag style and section ordering, but the *content* is identical.
+Format selection is orthogonal to model choice; the same assembled content can be rendered as markdown, XML, JSON, or plain text.
 
 ### 4.2 Example Output Structure (markdown)
 
@@ -699,4 +699,3 @@ Each built-in has the same shape as a user-defined pattern, so overriding one by
 - **Not a code indexer.** No persistent AST graph, no cross-repo symbol search.
 - **Not a prompt library.** Prompts live in your editor, agent, or shell.
 - **Not opinionated about models.** Llama, Claude, GPT, Mistral, local or hosted — all equally supported.
-

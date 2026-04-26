@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
-use cargo_context_core::{Budget, BudgetStrategy, PackBuilder, Preset, Tokenizer};
+use cargo_context_core::{
+    Budget, BudgetStrategy, PackBuilder, Preset, Tokenizer,
+    collect::{self, Diff},
+    scrub::Scrubber,
+};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use serde::Deserialize;
 
@@ -103,8 +107,7 @@ impl CargoContextServer {
     )]
     async fn get_last_error(&self) -> Result<String, String> {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        let d = cargo_context_core::collect::last_error(&root).map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&d).map_err(|e| e.to_string())
+        scrubbed_errors_json(&root).map_err(|e| e.to_string())
     }
 
     #[rmcp::tool(
@@ -114,9 +117,7 @@ impl CargoContextServer {
     )]
     async fn get_diff(&self, Parameters(args): Parameters<GetDiffArgs>) -> Result<String, String> {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        let diff = cargo_context_core::collect::git_diff(&root, args.range.as_deref())
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&diff).map_err(|e| e.to_string())
+        scrubbed_diff_json(&root, args.range.as_deref()).map_err(|e| e.to_string())
     }
 
     #[rmcp::tool(
@@ -136,5 +137,85 @@ impl CargoContextServer {
             Some(expanded) => Ok(expanded),
             None => Err("cargo-expand not available or expansion failed".into()),
         }
+    }
+}
+
+pub(crate) fn scrubbed_diff_json(
+    root: &std::path::Path,
+    range: Option<&str>,
+) -> anyhow::Result<String> {
+    let scrubber = Scrubber::with_workspace(root)?;
+    let diff = collect::git_diff(root, range)?;
+    let diff = scrub_diff(diff, &scrubber);
+    Ok(serde_json::to_string_pretty(&diff)?)
+}
+
+pub(crate) fn scrubbed_errors_json(root: &std::path::Path) -> anyhow::Result<String> {
+    let scrubber = Scrubber::with_workspace(root)?;
+    let diagnostics = collect::last_error(root)?;
+    let json = serde_json::to_string_pretty(&diagnostics)?;
+    Ok(scrubber.scrub(&json))
+}
+
+pub(crate) fn scrubbed_map_json(root: &std::path::Path) -> anyhow::Result<String> {
+    let scrubber = Scrubber::with_workspace(root)?;
+    let map = collect::cargo_metadata(root)?;
+    let json = serde_json::to_string_pretty(&map)?;
+    Ok(scrubber.scrub(&json))
+}
+
+fn scrub_diff(mut diff: Diff, scrubber: &Scrubber) -> Diff {
+    for file in &mut diff.files {
+        if scrubber.is_path_excluded(&file.path) {
+            continue;
+        }
+        if scrubber.is_path_redacted(&file.path) {
+            let marker = format!(
+                "[REDACTED FILE: {} — diff hunk elided]\n",
+                file.path.display()
+            );
+            for hunk in &mut file.hunks {
+                hunk.body = marker.clone();
+            }
+            continue;
+        }
+        for hunk in &mut file.hunks {
+            hunk.body = scrubber.scrub(&hunk.body);
+        }
+    }
+    diff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cargo_context_core::collect::{DiffHunk, FileDiff, FileStatus};
+
+    #[test]
+    fn scrub_diff_redacts_secret_values_in_hunks() {
+        let scrubber = Scrubber::with_builtins().unwrap();
+        let diff = Diff {
+            range: None,
+            files: vec![FileDiff {
+                path: PathBuf::from("src/lib.rs"),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 1,
+                    body: "+let key = \"ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD\";\n"
+                        .to_string(),
+                }],
+                binary: false,
+            }],
+        };
+
+        let scrubbed = scrub_diff(diff, &scrubber);
+
+        let body = &scrubbed.files[0].hunks[0].body;
+        assert!(body.contains("<REDACTED:github:"));
+        assert!(!body.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD"));
     }
 }
