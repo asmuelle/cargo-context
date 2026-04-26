@@ -288,3 +288,62 @@ fn files_from_and_impact_scope_are_mutually_exclusive() {
         "clap conflict message missing: {stderr}"
     );
 }
+
+#[test]
+fn include_path_force_adds_matching_files_and_expands_globs() {
+    let (tmp, _envelope) = scaffold(
+        &[
+            "src/hot.rs",
+            "crates/a/src/lib.rs",
+            "crates/b/src/lib.rs",
+            "crates/b/src/main.rs",
+        ],
+        ENVELOPE,
+    );
+    let out = run(
+        tmp.path(),
+        &[
+            "--preset",
+            "fix",
+            "--include-path",
+            "crates/**/lib.rs",
+            "--exclude-path",
+            "**/b/**",
+        ],
+    );
+
+    assert!(
+        out.contains("Included Paths"),
+        "include section missing:\n{out}"
+    );
+    assert!(out.contains("crates/a/src/lib.rs"));
+    assert!(
+        !out.contains("crates/b/src/lib.rs"),
+        "exclude should win over include:\n{out}"
+    );
+    assert!(
+        !out.contains("crates/b/src/main.rs"),
+        "exclude should suppress non-included matching paths too:\n{out}"
+    );
+}
+
+#[test]
+fn exclude_path_filters_impact_scope_files() {
+    let (tmp, envelope) = scaffold(&["src/hot.rs", "src/warm.rs", "README"], ENVELOPE);
+    let out = run(
+        tmp.path(),
+        &[
+            "--impact-scope",
+            envelope.to_str().unwrap(),
+            "--exclude-path",
+            "src/warm.rs",
+        ],
+    );
+
+    assert!(out.contains("src/hot.rs"));
+    assert!(
+        !out.contains("src/warm.rs"),
+        "excluded impact file leaked:\n{out}"
+    );
+    assert!(out.contains("README"));
+}

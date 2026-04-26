@@ -491,4 +491,32 @@ mod tests {
             a.dropped
         );
     }
+
+    #[test]
+    fn non_exempt_strategies_do_not_exceed_effective_budget() {
+        for strategy in [
+            BudgetStrategy::Priority,
+            BudgetStrategy::Proportional,
+            BudgetStrategy::Truncate,
+        ] {
+            let candidates = vec![
+                (P_ERROR, mk("errors", 300)),
+                (P_DIFF, mk("diff", 800)),
+                (P_MAP, mk("map", 200)),
+                (P_TESTS, mk("tests", 500)),
+            ];
+            let b = Budget {
+                max_tokens: 700,
+                reserve_tokens: 100,
+                strategy,
+            };
+            let a = allocate(candidates, &b, &Tokenizer::CharsDiv4);
+            assert!(
+                a.tokens_used <= b.effective(),
+                "{strategy:?} used {} tokens over effective budget {}",
+                a.tokens_used,
+                b.effective()
+            );
+        }
+    }
 }

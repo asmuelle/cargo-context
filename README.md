@@ -137,8 +137,8 @@ cargo context scrub --check
 | `--min-confidence <F>` | — | Drop findings whose confidence is below `F` (range `[0.0, 1.0]`). Findings with no confidence field survive. Requires `--impact-scope`. |
 | `--per-finding` | off | Emit one `📂 Impact: <id>` section per finding (with evidence + suggested action) instead of a single aggregated section. Requires `--impact-scope`. |
 | `--exclude-ids <IDS>` | — | Comma-separated finding ids to skip (e.g. `f-aaaa,f-bbbb`). Requires `--impact-scope`. |
-| `--include-path <GLOB>` | — | Force-include paths (repeatable). |
-| `--exclude-path <GLOB>` | — | Exclude paths (repeatable). |
+| `--include-path <GLOB>` | — | Force-include matching files in a separate "📌 Included Paths" section (repeatable). |
+| `--exclude-path <GLOB>` | — | Suppress matching files from diff/scoped/impact/entry/expanded/test context. Exclude wins over include. |
 
 ### 3.3 Scrubber flags
 
@@ -221,7 +221,7 @@ Modified `src/auth.rs`:
 
 ## 5. Token Budgeting
 
-Token budgeting is a **first-class concern**, not an afterthought. The pack will never silently exceed its budget.
+Token budgeting is a **first-class concern**, not an afterthought. The effective content budget is `--max-tokens - --reserve-tokens`; the user prompt section is exempt so the caller's actual question is never dropped.
 
 ### 5.1 Tokenizer Selection
 
@@ -229,20 +229,21 @@ Token budgeting is a **first-class concern**, not an afterthought. The pack will
 
 | Tokenizer | Backing library | Default for |
 | :--- | :--- | :--- |
-| `llama3` | `tokenizers` crate (HuggingFace) with `meta-llama/Meta-Llama-3-8B` vocab | Local llama, Ollama |
-| `llama2` | `tokenizers` crate | Legacy llama, CodeLlama |
+| `llama3` | calibrated heuristic (~3.5 chars/token) | Local llama, Ollama |
+| `llama2` | calibrated heuristic (~3.3 chars/token) | Legacy llama, CodeLlama |
 | `tiktoken-cl100k` | `tiktoken-rs` | GPT-4, GPT-4o |
 | `tiktoken-o200k` | `tiktoken-rs` | GPT-5 family |
-| `claude` | `tokenizers` crate with Anthropic BPE approximation | Claude 3.5+ |
+| `claude` | `tiktoken-rs` `cl100k_base` approximation | Claude 3.5+ |
 | `chars-div-4` | built-in heuristic | Unknown / offline fallback |
+| `hf-llama3` | local HuggingFace `tokenizer.json` via `--hf-llama3-vocab` | Exact local vocab counting |
 
-Tokenizer vocabs are downloaded once to `~/.cache/cargo-context/tokenizers/` and cached. Offline mode (`--offline`) falls back to `chars-div-4` and warns.
+No tokenizer vocab is downloaded automatically. Use `--hf-llama3-vocab <PATH>` when exact HuggingFace tokenizer counting is required.
 
 ### 5.2 Budget Flags
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `--max-tokens <N>` | `8000` | Hard ceiling. Pack construction stops before exceeding. |
+| `--max-tokens <N>` | `8000` | Total model budget before reserve is subtracted. |
 | `--tokenizer <name>` | `llama3` | One of the tokenizers above. |
 | `--reserve-tokens <N>` | `2000` | Reserved for the model's response; subtracted from `--max-tokens`. |
 | `--budget-strategy` | `priority` | `priority` (below), `proportional`, or `truncate`. |
@@ -251,29 +252,22 @@ Tokenizer vocabs are downloaded once to `~/.cache/cargo-context/tokenizers/` and
 
 When `--budget-strategy=priority` (default), sections are packed in this order and later sections are dropped whole if they don't fit:
 
-1. **Errors** (compiler diagnostics) — 20% floor
-2. **Diff** (git changes) — 30% floor
-3. **Directly referenced files** (from errors + diff) — remainder
-4. **Map** (workspace, deps) — 5% cap
-5. **Entry points** (signatures only) — 10% cap
-6. **Related tests** — whatever is left
+1. **User prompt** — exempt from budget pressure.
+2. **Errors** — compiler diagnostics.
+3. **Diff / scoped files / forced includes** — working tree intent and explicit user scope.
+4. **Map** — workspace members and key dependencies.
+5. **Entry points / expanded macros** — crate skeleton and optional expansion output.
+6. **Related tests** — plausible verification targets.
 
-Each file included shows a header:
+Other strategies:
 
-```
---- FILE: src/auth.rs (tokens: 412, truncated: false) ---
-```
+- `proportional` scales competing sections down by the same ratio and emits truncation markers.
+- `truncate` keeps priority order, truncates the first overflowing section, then stops.
 
-If a single file exceeds its allocation, `cargo-context` includes only the functions/items referenced by the error or diff, plus a footer:
-
-```
-[... 340 tokens elided: 4 unreferenced items. Use --include-path to force inclusion.]
-```
-
-The final pack header always reports actual vs. budget:
+The final pack header reports actual tokens used, effective budget, tokenizer, and dropped sections:
 
 ```
-<!-- tokens: 7823/8000 (97.8%) | sections: errors,diff,files,map | dropped: tests -->
+<!-- schema: cargo-context/v1 | tokens: 5823/6000 | tokenizer: llama3 | dropped: 🎯 Related Tests -->
 ```
 
 ---
@@ -284,20 +278,18 @@ Rust's hardest AI-coding problem is opaque macros. `#[derive(Serialize)]`, `toki
 
 ### 6.1 Mechanism
 
-`cargo-context` shells out to `cargo expand` (via the `cargo-expand` subcommand, a thin wrapper over `rustc -Zunpretty=expanded`) when:
+`cargo-context` shells out to `cargo expand` when:
 
-- `--expand-macros` is passed explicitly, OR
-- An error in the captured stderr points at a line inside a macro invocation, OR
-- The `--fix` preset is active and any file in the diff contains a proc-macro attribute.
+- `--expand-macros=on` is passed, OR
+- `--expand-macros=auto` is passed and the current diff contains Rust files.
 
 ### 6.2 Flags
 
 | Flag | Description |
 | :--- | :--- |
-| `--expand-macros` | Always expand macros in files pulled into the pack. |
-| `--expand-macros=auto` | Expand only when heuristic triggers (default when available). |
+| `--expand-macros=on` | Expand macros in workspace members. |
+| `--expand-macros=auto` | Expand only when the current diff contains `.rs` files. |
 | `--expand-macros=off` | Never expand. |
-| `--expand-filter <regex>` | Expand only macros matching pattern (e.g. `^sqlx::`). |
 
 ### 6.3 Output Shape
 
@@ -321,8 +313,7 @@ fn main() {
 
 ### 6.4 Requirements & Fallbacks
 
-- Requires `cargo-expand` on `PATH`. If missing, `cargo-context` prints a one-line install hint (`cargo install cargo-expand`) and proceeds without expansion rather than failing.
-- Requires a nightly `rustc` for full fidelity. On stable-only systems, `cargo-context` falls back to `rustc --pretty=expanded` via `RUSTC_BOOTSTRAP=1` only if `--allow-bootstrap` is explicitly set; otherwise it skips with a warning.
+- Requires `cargo-expand` on `PATH`. If missing or expansion fails, pack construction proceeds without expansion.
 - Expansion output is cached by `(file_path, mtime, cargo_lock_hash)` in `target/cargo-context/expand/` so repeat runs are free.
 
 ---
@@ -345,7 +336,7 @@ Three layers run in sequence; any match triggers redaction:
    - JWTs (`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
    - Generic high-entropy strings in `KEY=`, `SECRET=`, `TOKEN=`, `PASSWORD=` assignments
 2. **Entropy-based** — Shannon entropy > 4.5 on tokens ≥ 20 chars in values adjacent to suspicious keys. Catches rotated keys the pattern layer misses.
-3. **Path-based** — file paths matching `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*credentials*`, `*secrets*` are redacted whole unless `--include-path` explicitly overrides.
+3. **Path-based** — project config can redact whole files by glob. `--include-path` can force a file into the pack, but scrub path redaction still applies. `--exclude-path` suppresses matching files before rendering.
 
 ### 7.2 Redaction Format
 
@@ -361,14 +352,14 @@ The last 4 chars of a SHA-256 hash (`8f2a`) let humans correlate repeated occurr
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `--scrub` | `on` | Master switch. `--scrub=off` disables (requires `--i-know-what-im-doing`). |
-| `--scrub-rules <path>` | — | Extra YAML rule file merged with defaults. |
-| `--scrub-allowlist <path>` | — | Known-safe patterns to skip (e.g. public demo keys). |
+| `--no-scrub` | off | Disable all scrubbing. Requires `--i-know-what-im-doing`. |
 | `--scrub-report` | off | Prints a summary of what was redacted (category + count, never value) to stderr. |
+| `--strict-scrub` | off | Exit `2` after rendering if any redaction occurred. |
 
 ### 7.4 Guarantees
 
-- Scrubbing runs on the *final assembled pack*, so it catches secrets introduced by expansion, diff hunks, and error messages alike.
+- CLI pack rendering scrubs candidate sections before budgeting/output.
+- MCP `build_context_pack`, `get_diff`, `get_last_error`, `expand_macros`, resources, and prompts use the same workspace scrub config boundary.
 - A non-zero exit code is returned if scrubbing had to redact anything and `--strict-scrub` is set — useful for CI pipes.
 - The scrubber itself is open-source and its rule file lives at `.cargo-context/scrub.yaml` for project-level extension.
 
@@ -420,7 +411,7 @@ For agentic coding tools that speak the **Model Context Protocol** (Claude Code,
 cargo-context-mcp
 ```
 
-**Exposed tools** (as of v0.1.0 — resources and prompts are roadmap):
+**Exposed tools:**
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
@@ -477,7 +468,7 @@ The CLI binary and MCP server are both thin shells over this crate.
 
 ```text
 cargo-context/
-├── Cargo.toml                  # [workspace] manifest; pins rust-toolchain = "stable"
+├── Cargo.toml                  # [workspace] manifest; shared deps/version
 ├── rust-toolchain.toml
 ├── crates/
 │   ├── cargo-context-core/     # Pure library. No I/O to terminals, no network.
@@ -486,27 +477,18 @@ cargo-context/
 │   │       ├── lib.rs
 │   │       ├── pack/
 │   │       │   ├── mod.rs          # PackBuilder, Pack, Section
-│   │       │   ├── render.rs       # markdown / xml / json / plain
-│   │       │   └── schema.rs       # serde types for JSON output
+│   │       │   ├── render.rs       # section render helpers
+│   │       │   └── impact.rs       # scoped files / cargo-impact rendering
 │   │       ├── collect/
 │   │       │   ├── mod.rs
-│   │       │   ├── diff.rs         # git2-based diff capture
-│   │       │   ├── errors.rs       # cargo check stderr parsing (cargo_metadata::Message)
+│   │       │   ├── diff.rs         # git diff shell-out capture
+│   │       │   ├── errors.rs       # cargo check JSON diagnostics
 │   │       │   ├── meta.rs         # cargo_metadata wrapper
 │   │       │   ├── entry.rs        # main.rs / lib.rs / #[*::main] discovery
 │   │       │   └── tests.rs        # #[cfg(test)] + tests/ linkage
-│   │       ├── expand/
-│   │       │   ├── mod.rs          # cargo-expand wrapper + cache
-│   │       │   └── cache.rs        # target/cargo-context/expand/ keyed by (path, mtime, lockhash)
-│   │       ├── tokenize/
-│   │       │   ├── mod.rs          # Tokenizer trait
-│   │       │   ├── llama.rs        # tokenizers crate, HF vocab
-│   │       │   ├── tiktoken.rs     # tiktoken-rs
-│   │       │   ├── claude.rs       # anthropic BPE approximation
-│   │       │   └── heuristic.rs    # chars/4 fallback
-│   │       ├── budget/
-│   │       │   ├── mod.rs          # Budget, Allocation
-│   │       │   └── priority.rs     # priority/proportional/truncate strategies
+│   │       ├── expand.rs           # cargo-expand wrapper + cache
+│   │       ├── tokenize.rs         # token counters and HF tokenizer cache
+│   │       ├── budget.rs           # priority/proportional/truncate allocation
 │   │       ├── scrub/
 │   │       │   ├── mod.rs          # Scrubber pipeline
 │   │       │   ├── patterns.rs     # built-in regex rules
@@ -514,39 +496,28 @@ cargo-context/
 │   │       │   ├── paths.rs        # path-based rules
 │   │       │   └── config.rs       # serde_yaml loader for scrub.yaml
 │   │       └── error.rs            # thiserror enum
-│   │   └── tests/
-│   │       ├── pack_snapshot.rs    # insta snapshots of rendered packs
-│   │       ├── scrub_property.rs   # proptest: no secret in output
-│   │       └── budget_invariants.rs
+│   │   └── tests live inline beside the modules they exercise.
 │   │
 │   ├── cargo-context-cli/      # The `cargo context` subcommand binary.
 │   │   ├── Cargo.toml              # [[bin]] name = "cargo-context"
 │   │   └── src/
 │   │       ├── main.rs             # clap parser; dispatches to core
 │   │       ├── args.rs             # derive(Parser), presets (--fix, --feature)
-│   │       └── stdin.rs            # reads piped prompt, forwards to PackBuilder
+│   │       └── tests/              # CLI integration tests
 │   │
 │   ├── cargo-context-mcp/      # MCP server binary.
 │   │   ├── Cargo.toml              # [[bin]] name = "cargo-context-mcp"
 │   │   └── src/
-│   │       ├── main.rs             # launched by `cargo context mcp`
+│   │       ├── main.rs             # stdio MCP process entry
 │   │       ├── server.rs           # rmcp server bootstrap
-│   │       ├── tools.rs            # build_context_pack, get_last_error, etc.
-│   │       ├── resources.rs        # cargo-context://pack/current
-│   │       └── prompts.rs          # fix_compiler_error
+│   │       └── tools.rs            # build_context_pack, get_last_error, get_diff, expand_macros
 │   │
 │   └── cargo-context-scrub/    # Extracted scrubber (standalone reuse).
 │       ├── Cargo.toml
 │       └── src/lib.rs              # Re-exports core::scrub for non-Rust-project use
 │
-├── xtask/                      # cargo-xtask for release, vocab download, snapshot updates
-│   └── src/main.rs
-├── .cargo-context/
-│   └── scrub.yaml              # Project-level scrub rules (shipped as example)
-└── examples/
-    ├── pipe_to_ollama.sh
-    ├── pipe_to_llama_cpp.sh
-    └── mcp_claude_code.json
+├── scripts/qa/                 # local QA helpers
+└── README.md
 ```
 
 ### 9.1 Dependency Graph
@@ -554,7 +525,7 @@ cargo-context/
 ```text
 cargo-context-cli ─┐
                    ├──> cargo-context-core ──> cargo-context-scrub
-cargo-context-mcp ─┘                      └──> (tokenizers, tiktoken-rs, git2, cargo_metadata)
+cargo-context-mcp ─┘                      └──> (tokenizers, tiktoken-rs, git, cargo_metadata)
 ```
 
 The `core` crate has **zero** async runtime dependency — `tokio` lives only in `-mcp`. This keeps embedding in sync codebases (editor plugins, build scripts) cheap.
@@ -563,21 +534,21 @@ The `core` crate has **zero** async runtime dependency — `tokio` lives only in
 
 | Crate | Depends on | Why |
 | :--- | :--- | :--- |
-| `core` | `git2`, `cargo_metadata`, `tokenizers`, `tiktoken-rs`, `regex`, `serde`, `serde_yaml`, `sha2`, `thiserror`, `ignore` | Pack assembly, tokenization, scrubbing |
-| `cli` | `core`, `clap` (derive), `anyhow`, `atty` | Argument parsing, TTY detection for color |
-| `mcp` | `core`, `rmcp` (or `mcp-sdk`), `tokio`, `tracing` | MCP stdio/SSE transport |
+| `core` | `cargo_metadata`, `tokenizers`, `tiktoken-rs`, `regex`, `globset`, `serde`, `serde_yaml`, `sha2`, `thiserror` | Pack assembly, tokenization, scrubbing |
+| `cli` | `core`, `clap` (derive), `anyhow` | Argument parsing, TTY/stdin handling |
+| `mcp` | `core`, `rmcp`, `tokio`, `tracing`, `schemars` | MCP stdio transport |
 | `scrub` | `core::scrub` (re-export) | Allow non-cargo projects to reuse the scrubber |
 
 ### 9.3 MSRV & Release
 
 - **MSRV:** Rust 1.95 (stable). `core` compiles on stable; macro expansion *shells out* to the user's `cargo-expand`, so `core` itself never needs nightly.
-- **Release:** `xtask release` cuts all four crates in lockstep with matching versions. `cargo-context-core` is semver-stable from `0.1`; binaries follow.
+- **Release:** all four crates are versioned in lockstep from the workspace package version. Release automation builds binaries from tagged versions.
 
 ---
 
 ## 10. Scrub Rule Schema (`scrub.yaml`)
 
-The scrubber's built-in rules live in `core` and are always active. Projects extend or override them via `.cargo-context/scrub.yaml` (loaded automatically from the workspace root) or any file passed to `--scrub-rules`.
+The scrubber's built-in rules live in `core` and are active by default. Projects extend or override them via `.cargo-context/scrub.yaml`, loaded automatically from the workspace root.
 
 ### 10.1 Top-Level Shape
 
@@ -645,9 +616,8 @@ allowlist:
 
 # Reporting behavior.
 report:
-  stderr_summary: true  # print `[scrub] redacted 4 secrets (aws:1, jwt:2, entropy:1)`
-  fail_on_match: false  # CI mode: exit non-zero if anything was scrubbed
   log_file: null        # optional path; JSON lines of redactions (no values)
+  max_entries: null     # optional cap for retained JSONL entries
 ```
 
 ### 10.2 Field Reference
@@ -660,7 +630,7 @@ report:
 | `patterns[].id` | string | — | Stable identifier. Appears in redaction fingerprint and reports. |
 | `patterns[].regex` | string | — | Rust `regex` crate syntax. Compiled at startup; invalid patterns fail loudly. |
 | `patterns[].category` | string | `generic` | Free-form tag. Used in reports and replacement tokens. |
-| `patterns[].replacement` | string | auto | Template. Placeholders: `{id}`, `{category}`, `{hash4}`, `{hash8}`. |
+| `patterns[].replacement` | string | auto | Template. Placeholder: `{hash4}`. |
 | `patterns[].severity` | enum | `high` | `low` / `medium` / `high` / `critical`. Affects `--strict-scrub` behavior. |
 | `entropy.enabled` | bool | `true` | Master switch for entropy detection. |
 | `entropy.min_length` | int | `20` | Tokens shorter than this are skipped. |
@@ -670,9 +640,8 @@ report:
 | `paths.exclude` | glob[] | `[]` | Paths exempted from *all* scrubbing. |
 | `allowlist[].exact` | string | — | Literal string never redacted. |
 | `allowlist[].regex` | string | — | Regex of strings never redacted. |
-| `report.stderr_summary` | bool | `true` | One-line summary on stderr after pack generation. |
-| `report.fail_on_match` | bool | `false` | Equivalent to always passing `--strict-scrub`. |
-| `report.log_file` | path? | `null` | JSON-lines audit log. Never contains secret values — only `{id, category, file, line, hash4}`. |
+| `report.log_file` | path? | `null` | JSON-lines audit log. Never contains secret values — only rule metadata and `hash4`. |
+| `report.max_entries` | int? | `null` | Retain only the most recent N audit log entries after each write. |
 
 ### 10.3 Built-In Rule IDs
 
@@ -687,7 +656,6 @@ Each built-in has the same shape as a user-defined pattern, so overriding one by
 
 ### 10.4 Validation
 
-- The file is validated against a JSON Schema shipped at `crates/cargo-context-core/schemas/scrub.v1.json`.
 - `cargo context scrub --check` loads, validates, and prints effective rules (merged built-ins + overrides) without generating a pack. Useful for pre-commit hooks.
 - Regex patterns are compiled once at startup; a malformed regex aborts with a line/column-anchored error rather than silently skipping.
 

@@ -22,3 +22,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

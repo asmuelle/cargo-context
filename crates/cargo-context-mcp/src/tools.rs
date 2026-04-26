@@ -131,10 +131,11 @@ impl CargoContextServer {
     ) -> Result<String, String> {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
         let file = PathBuf::from(&args.file);
+        let scrubber = Scrubber::with_workspace(&root).map_err(|e| e.to_string())?;
         match cargo_context_core::expand::expand_file(&root, &args.crate_name, &file)
             .map_err(|e| e.to_string())?
         {
-            Some(expanded) => Ok(expanded),
+            Some(expanded) => Ok(scrub_file_text(&scrubber, &file, &expanded)),
             None => Err("cargo-expand not available or expansion failed".into()),
         }
     }
@@ -186,10 +187,15 @@ fn scrub_diff(mut diff: Diff, scrubber: &Scrubber) -> Diff {
     diff
 }
 
+fn scrub_file_text(scrubber: &Scrubber, path: &std::path::Path, content: &str) -> String {
+    scrubber.scrub_file(path, content).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cargo_context_core::collect::{DiffHunk, FileDiff, FileStatus};
+    use std::process::Command;
 
     #[test]
     fn scrub_diff_redacts_secret_values_in_hunks() {
@@ -217,5 +223,117 @@ mod tests {
         let body = &scrubbed.files[0].hunks[0].body;
         assert!(body.contains("<REDACTED:github:"));
         assert!(!body.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD"));
+    }
+
+    #[test]
+    fn scrub_file_text_redacts_expanded_source() {
+        let scrubber = Scrubber::with_builtins().unwrap();
+        let source = r#"const KEY: &str = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD";"#;
+
+        let scrubbed = scrub_file_text(&scrubber, &PathBuf::from("src/lib.rs"), source);
+
+        assert!(scrubbed.contains("<REDACTED:github:"));
+        assert!(!scrubbed.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD"));
+    }
+
+    #[test]
+    fn scrubbed_diff_json_redacts_resource_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path().join("tracked.txt"), "clean\n");
+        git(tmp.path(), &["init"]);
+        git(tmp.path(), &["add", "."]);
+        git(
+            tmp.path(),
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        write_file(
+            tmp.path().join("tracked.txt"),
+            "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD\n",
+        );
+
+        let json = scrubbed_diff_json(tmp.path(), None).unwrap();
+
+        assert!(json.contains("<REDACTED:github:"));
+        assert!(!json.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD"));
+    }
+
+    #[test]
+    fn scrubbed_errors_json_redacts_resource_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cargo_project(
+            tmp.path(),
+            "error-proj",
+            r#"
+pub fn broken() {
+    let _: u32 = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD";
+}
+"#,
+        );
+
+        let json = scrubbed_errors_json(tmp.path()).unwrap();
+
+        assert!(json.contains("<REDACTED:github:"));
+        assert!(!json.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD"));
+    }
+
+    #[test]
+    fn scrubbed_map_json_respects_workspace_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cargo_project(tmp.path(), "secret-pkg", "pub fn ok() {}\n");
+        std::fs::create_dir_all(tmp.path().join(".cargo-context")).unwrap();
+        write_file(
+            tmp.path().join(".cargo-context/scrub.yaml"),
+            r#"
+version: 1
+patterns:
+  - id: project_name
+    regex: 'secret-pkg'
+    category: project
+    severity: high
+"#,
+        );
+
+        let json = scrubbed_map_json(tmp.path()).unwrap();
+
+        assert!(json.contains("<REDACTED:project:"));
+        assert!(!json.contains("secret-pkg"));
+    }
+
+    fn write_cargo_project(root: &std::path::Path, name: &str, source: &str) {
+        write_file(
+            root.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+        );
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        write_file(root.join("src/lib.rs"), source);
+    }
+
+    fn write_file(path: std::path::PathBuf, contents: impl AsRef<[u8]>) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
