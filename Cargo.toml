@@ -33,7 +33,7 @@ proc-macro2 = "1"
 prettyplease = "0.2"
 tiktoken-rs = "0.6"
 globset = "0.4"
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 rmcp = { version = "1.5", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
 schemars = "1"
 clap = { version = "4", features = ["derive"] }
