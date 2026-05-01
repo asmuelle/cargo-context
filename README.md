@@ -155,6 +155,7 @@ Every pack also includes a compact **Context Manifest**. In JSON output this is
 the structured `manifest` field; in markdown/xml/plain it renders before content
 sections. The manifest reports the active preset, diff source, collectors,
 include/exclude filters, file attribution, budget decisions, and scrub summary.
+Its overhead is included in pack token accounting.
 
 ### 3.3 Scrubber flags
 

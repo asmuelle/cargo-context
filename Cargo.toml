@@ -12,7 +12,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-repository = "https://github.com/andreasmueller/cargo-context"
+repository = "https://github.com/asmuelle/cargo-context"
 authors = ["Andreas Mueller"]
 
 [workspace.dependencies]

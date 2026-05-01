@@ -6,7 +6,7 @@ keep the gates green, and ship small PRs.
 ## Quick start
 
 ```bash
-git clone https://github.com/andreasmueller/cargo-context
+git clone https://github.com/asmuelle/cargo-context
 cd cargo-context
 
 # Build + run all local gates (mirrors CI).

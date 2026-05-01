@@ -27,9 +27,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   Manifest before content sections.
 - Budget allocation now records per-section keep, drop, and truncation
   decisions with original and final token estimates.
+- Pack token accounting now includes manifest overhead.
 - Release publishing is documented and enforced as GitHub Actions-only, with
   crates.io dry-runs, idempotent publish checks, and post-publish verification
   in dependency order.
+
+### Fixed
+
+- Scrub reports, strict scrub exits, and audit logs now include scoped-file
+  path redactions from `--files-from`, `--impact-scope`, and forced includes.
+- CLI JSON manifests now scrub manifest metadata before output.
 
 ## [0.2.0] - 2026-04-24
 

@@ -12,7 +12,7 @@ use crate::collect::{self, Diff};
 use crate::error::{Error, Result};
 use crate::expand::{self, ExpandMode};
 use crate::impact::Finding;
-use crate::scrub::Scrubber;
+use crate::scrub::{ScrubReport, Scrubber};
 use crate::tokenize::Tokenizer;
 
 pub mod impact;
@@ -191,6 +191,9 @@ impl PackManifest {
             self.budget.tokens_used,
             self.budget.tokens_budget
         ));
+        if self.budget.manifest_tokens > 0 {
+            out.push_str(&format!(" (manifest: {})", self.budget.manifest_tokens));
+        }
         let changed = self
             .budget
             .decisions
@@ -246,6 +249,58 @@ impl PackManifest {
             .map(|line| format!("{indent}{line}\n"))
             .collect()
     }
+
+    fn scrub_strings(&mut self, scrubber: &Scrubber) -> ScrubReport {
+        let mut report = ScrubReport::default();
+
+        if let DiffSource::Range(range) = &mut self.diff_source {
+            scrub_string(range, scrubber, &mut report);
+        }
+        scrub_strings(&mut self.collectors, scrubber, &mut report);
+        scrub_strings(&mut self.path_filters.include, scrubber, &mut report);
+        scrub_strings(&mut self.path_filters.exclude, scrubber, &mut report);
+        scrub_strings(
+            &mut self.path_filters.unmatched_include,
+            scrubber,
+            &mut report,
+        );
+        for file in &mut self.files {
+            scrub_string(&mut file.path, scrubber, &mut report);
+            scrub_strings(&mut file.sources, scrubber, &mut report);
+            if let Some(reason) = &mut file.reason {
+                scrub_string(reason, scrubber, &mut report);
+            }
+        }
+        for decision in &mut self.budget.decisions {
+            scrub_string(&mut decision.section, scrubber, &mut report);
+            if let Some(reason) = &mut decision.reason {
+                scrub_string(reason, scrubber, &mut report);
+            }
+        }
+        scrub_string(&mut self.scrub.summary, scrubber, &mut report);
+
+        report
+    }
+}
+
+fn scrub_strings(values: &mut [String], scrubber: &Scrubber, report: &mut ScrubReport) {
+    for value in values {
+        scrub_string(value, scrubber, report);
+    }
+}
+
+fn scrub_string(value: &mut String, scrubber: &Scrubber, report: &mut ScrubReport) {
+    let (scrubbed, string_report) = scrubber.scrub_with_report(value);
+    *value = scrubbed;
+    report.redactions.extend(string_report.redactions);
+}
+
+fn manifest_token_estimate(manifest: &PackManifest, tokenizer: &Tokenizer) -> usize {
+    let rendered_tokens = tokenizer.count(&manifest.render_markdown());
+    let json_tokens = serde_json::to_string(manifest)
+        .map(|json| tokenizer.count(&json))
+        .unwrap_or(rendered_tokens);
+    rendered_tokens.max(json_tokens)
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -276,6 +331,8 @@ pub struct BudgetManifest {
     pub reserve_tokens: usize,
     pub tokens_budget: usize,
     pub tokens_used: usize,
+    #[serde(default)]
+    pub manifest_tokens: usize,
     pub strategy: BudgetStrategy,
     pub decisions: Vec<BudgetDecision>,
 }
@@ -419,6 +476,7 @@ impl PackBuilder {
         } else {
             Scrubber::empty()
         };
+        let mut scrub_report = ScrubReport::default();
 
         let mut candidates: Vec<(Priority, Section)> = Vec::new();
 
@@ -546,35 +604,42 @@ impl PackBuilder {
         if !impact_findings.is_empty() {
             if self.impact_per_finding {
                 for (idx, f) in impact_findings.iter().enumerate() {
-                    if let Some((name, body)) =
+                    if let Some((name, collected)) =
                         impact::try_collect_per_finding(&root, f, idx, &scrubber)
                     {
-                        candidates.push((P_DIFF, mk_section(&name, &body, &self.tokenizer)));
+                        scrub_report.redactions.extend(collected.report.redactions);
+                        candidates.push((
+                            P_DIFF,
+                            mk_section(&name, &collected.content, &self.tokenizer),
+                        ));
                     }
                 }
-            } else if let Some(content) =
+            } else if let Some(collected) =
                 impact::try_collect_scoped_findings(&root, &impact_findings, &scrubber)
             {
+                scrub_report.redactions.extend(collected.report.redactions);
                 candidates.push((
                     P_DIFF,
-                    mk_section("📂 Scoped Files", &content, &self.tokenizer),
+                    mk_section("📂 Scoped Files", &collected.content, &self.tokenizer),
                 ));
             }
         } else if !files_from.is_empty()
-            && let Some(content) = impact::try_collect_scoped(&root, &files_from, &scrubber)
+            && let Some(collected) = impact::try_collect_scoped(&root, &files_from, &scrubber)
         {
+            scrub_report.redactions.extend(collected.report.redactions);
             candidates.push((
                 P_DIFF,
-                mk_section("📂 Scoped Files", &content, &self.tokenizer),
+                mk_section("📂 Scoped Files", &collected.content, &self.tokenizer),
             ));
         }
         if !force_include_paths.is_empty()
-            && let Some(content) =
+            && let Some(collected) =
                 impact::try_collect_scoped(&root, &force_include_paths, &scrubber)
         {
+            scrub_report.redactions.extend(collected.report.redactions);
             candidates.push((
                 P_DIFF,
-                mk_section("📌 Included Paths", &content, &self.tokenizer),
+                mk_section("📌 Included Paths", &collected.content, &self.tokenizer),
             ));
         }
 
@@ -617,36 +682,82 @@ impl PackBuilder {
             ));
         }
 
-        let mut scrub_report = crate::scrub::ScrubReport::default();
         if self.scrub {
             for (_, s) in candidates.iter_mut() {
-                let (scrubbed, report) = scrubber.scrub_with_report(&s.content);
-                s.content = scrubbed;
+                let (scrubbed_name, name_report) = scrubber.scrub_with_report(&s.name);
+                s.name = scrubbed_name;
+                scrub_report.redactions.extend(name_report.redactions);
+
+                let (scrubbed_content, content_report) = scrubber.scrub_with_report(&s.content);
+                s.content = scrubbed_content;
                 s.token_estimate = self.tokenizer.count(&s.content);
-                scrub_report.redactions.extend(report.redactions);
+                scrub_report.redactions.extend(content_report.redactions);
             }
-            scrubber.log_redactions(&scrub_report)?;
         }
 
-        let alloc = budget::allocate(candidates, &self.budget, &self.tokenizer);
-        let manifest = PackManifest {
+        let total_budget = self.budget.effective();
+        let diff_source = self
+            .diff_range
+            .clone()
+            .map(DiffSource::Range)
+            .unwrap_or(DiffSource::WorkingTree);
+        let collectors = wants.labels();
+        let path_filter_manifest = PathFilterManifest {
+            include: path_filters.include_paths.clone(),
+            exclude: path_filters.exclude_paths.clone(),
+            unmatched_include: filter_report.include_patterns_unmatched.clone(),
+        };
+        let files = provenance.finish();
+
+        let preliminary_manifest = PackManifest {
             preset: self.preset,
-            diff_source: self
-                .diff_range
-                .map(DiffSource::Range)
-                .unwrap_or(DiffSource::WorkingTree),
-            collectors: wants.labels(),
-            path_filters: PathFilterManifest {
-                include: path_filters.include_paths.clone(),
-                exclude: path_filters.exclude_paths.clone(),
-                unmatched_include: filter_report.include_patterns_unmatched.clone(),
-            },
-            files: provenance.finish(),
+            diff_source: diff_source.clone(),
+            collectors: collectors.clone(),
+            path_filters: path_filter_manifest.clone(),
+            files: files.clone(),
             budget: BudgetManifest {
                 max_tokens: self.budget.max_tokens,
                 reserve_tokens: self.budget.reserve_tokens,
-                tokens_budget: alloc.tokens_budget,
+                tokens_budget: total_budget,
+                tokens_used: 0,
+                manifest_tokens: 0,
+                strategy: self.budget.strategy,
+                decisions: Vec::new(),
+            },
+            scrub: ScrubManifest {
+                enabled: self.scrub,
+                redactions: scrub_report.redactions.len(),
+                summary: scrub_report.summary(),
+            },
+        };
+        let manifest_reserve = manifest_token_estimate(&preliminary_manifest, &self.tokenizer);
+        let section_budget = Budget {
+            max_tokens: total_budget.saturating_sub(manifest_reserve),
+            reserve_tokens: 0,
+            strategy: self.budget.strategy,
+        };
+
+        let alloc = budget::allocate(candidates, &section_budget, &self.tokenizer);
+
+        let mut project = project_name(self.project_root.as_deref());
+        if self.scrub {
+            let (scrubbed_project, project_report) = scrubber.scrub_with_report(&project);
+            project = scrubbed_project;
+            scrub_report.redactions.extend(project_report.redactions);
+        }
+
+        let mut manifest = PackManifest {
+            preset: self.preset,
+            diff_source,
+            collectors,
+            path_filters: path_filter_manifest,
+            files,
+            budget: BudgetManifest {
+                max_tokens: self.budget.max_tokens,
+                reserve_tokens: self.budget.reserve_tokens,
+                tokens_budget: total_budget,
                 tokens_used: alloc.tokens_used,
+                manifest_tokens: manifest_reserve,
                 strategy: self.budget.strategy,
                 decisions: alloc.decisions.clone(),
             },
@@ -656,13 +767,27 @@ impl PackBuilder {
                 summary: scrub_report.summary(),
             },
         };
+        if self.scrub {
+            let manifest_report = manifest.scrub_strings(&scrubber);
+            scrub_report.redactions.extend(manifest_report.redactions);
+        }
+        let manifest_tokens = manifest_token_estimate(&manifest, &self.tokenizer);
+        let tokens_used = alloc.tokens_used + manifest_tokens;
+        manifest.budget.tokens_used = tokens_used;
+        manifest.budget.manifest_tokens = manifest_tokens;
+        manifest.scrub.redactions = scrub_report.redactions.len();
+        manifest.scrub.summary = scrub_report.summary();
+
+        if self.scrub {
+            scrubber.log_redactions(&scrub_report)?;
+        }
 
         Ok(Pack {
             schema: "cargo-context/v1".into(),
-            project: project_name(self.project_root.as_deref()),
+            project,
             sections: alloc.kept,
-            tokens_used: alloc.tokens_used,
-            tokens_budget: alloc.tokens_budget,
+            tokens_used,
+            tokens_budget: total_budget,
             tokenizer: self.tokenizer.label().into(),
             dropped: alloc.dropped,
             manifest,
@@ -1258,6 +1383,83 @@ mod tests {
             pack.render_markdown().contains("Context Manifest"),
             "markdown should expose the human-readable manifest"
         );
+    }
+
+    #[test]
+    fn manifest_strings_are_scrubbed_before_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".cargo-context")).unwrap();
+        std::fs::write(
+            tmp.path().join(".cargo-context/scrub.yaml"),
+            r#"
+version: 1
+patterns:
+  - id: secret_path
+    regex: 'secret-project'
+    category: path
+    severity: high
+"#,
+        )
+        .unwrap();
+
+        let pack = PackBuilder::new()
+            .include_path("src/secret-project.rs")
+            .diff_range("secret-project..HEAD")
+            .project_root(tmp.path())
+            .build()
+            .unwrap();
+        let json = pack.render_json().unwrap();
+
+        assert!(!json.contains("secret-project"));
+        assert!(json.contains("<REDACTED:path:"));
+        assert!(!pack.scrub.is_empty());
+        assert_eq!(pack.manifest.scrub.redactions, pack.scrub.redactions.len());
+    }
+
+    #[test]
+    fn scoped_file_path_redactions_are_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".cargo-context")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/secret.rs"), "DB_PASSWORD=hunter2\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".cargo-context/scrub.yaml"),
+            r#"
+version: 1
+paths:
+  redact_whole:
+    - "src/secret.rs"
+"#,
+        )
+        .unwrap();
+
+        let pack = PackBuilder::new()
+            .files_from(vec![PathBuf::from("src/secret.rs")])
+            .project_root(tmp.path())
+            .build()
+            .unwrap();
+        let out = pack.render_markdown();
+
+        assert!(out.contains("[REDACTED FILE: src/secret.rs]"));
+        assert!(!out.contains("hunter2"));
+        assert!(
+            pack.scrub
+                .redactions
+                .iter()
+                .any(|r| r.rule_id == "path_redact_whole")
+        );
+        assert_eq!(pack.manifest.scrub.redactions, pack.scrub.redactions.len());
+    }
+
+    #[test]
+    fn manifest_tokens_are_counted_in_pack_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = PackBuilder::new().project_root(tmp.path()).build().unwrap();
+
+        assert!(pack.manifest.budget.manifest_tokens > 0);
+        assert_eq!(pack.tokens_budget, pack.manifest.budget.tokens_budget);
+        assert_eq!(pack.tokens_used, pack.manifest.budget.tokens_used);
+        assert!(pack.tokens_used >= pack.manifest.budget.manifest_tokens);
     }
 
     #[test]

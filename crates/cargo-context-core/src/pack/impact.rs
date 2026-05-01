@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::impact::Finding;
-use crate::scrub::Scrubber;
+use crate::scrub::{ScrubReport, Scrubber};
 
 use super::render::lang_for_path;
 
@@ -31,10 +31,11 @@ pub(super) fn try_collect_scoped(
     root: &Path,
     paths: &[PathBuf],
     scrubber: &Scrubber,
-) -> Option<String> {
+) -> Option<CollectedContent> {
     let mut body = String::new();
     let mut included = 0_usize;
     let mut skipped = 0_usize;
+    let mut report = ScrubReport::default();
 
     for rel in paths {
         let abs = if rel.is_absolute() {
@@ -53,7 +54,8 @@ pub(super) fn try_collect_scoped(
                 continue;
             }
         };
-        let (content, _report) = scrubber.scrub_file(rel, &raw);
+        let (content, file_report) = scrubber.scrub_file(rel, &raw);
+        report.redactions.extend(file_report.redactions);
         let lang = lang_for_path(rel);
         body.push_str(&format!(
             "### `{}`\n```{lang}\n{}\n```\n\n",
@@ -74,18 +76,22 @@ pub(super) fn try_collect_scoped(
         ));
     }
     header.push_str(".\n\n");
-    Some(format!("{header}{body}"))
+    Some(CollectedContent {
+        content: format!("{header}{body}"),
+        report,
+    })
 }
 
 pub(super) fn try_collect_scoped_findings(
     root: &Path,
     findings: &[Finding],
     scrubber: &Scrubber,
-) -> Option<String> {
+) -> Option<CollectedContent> {
     let mut body = String::new();
     let mut included = 0_usize;
     let mut skipped = 0_usize;
     let mut emitted: HashSet<PathBuf> = HashSet::new();
+    let mut report = ScrubReport::default();
 
     for (i, f) in findings.iter().enumerate() {
         if !emitted.insert(f.primary_path.clone()) {
@@ -107,7 +113,8 @@ pub(super) fn try_collect_scoped_findings(
                 continue;
             }
         };
-        let (content, _report) = scrubber.scrub_file(&f.primary_path, &raw);
+        let (content, file_report) = scrubber.scrub_file(&f.primary_path, &raw);
+        report.redactions.extend(file_report.redactions);
         let lang = f.language_hint();
 
         let co_findings: Vec<&Finding> = findings
@@ -136,7 +143,10 @@ pub(super) fn try_collect_scoped_findings(
         ));
     }
     preamble.push_str(".\n\n");
-    Some(format!("{preamble}{body}"))
+    Some(CollectedContent {
+        content: format!("{preamble}{body}"),
+        report,
+    })
 }
 
 pub(super) fn try_collect_per_finding(
@@ -144,7 +154,7 @@ pub(super) fn try_collect_per_finding(
     f: &Finding,
     idx: usize,
     scrubber: &Scrubber,
-) -> Option<(String, String)> {
+) -> Option<(String, CollectedContent)> {
     let abs = if f.primary_path.is_absolute() {
         f.primary_path.clone()
     } else {
@@ -154,7 +164,7 @@ pub(super) fn try_collect_per_finding(
         return None;
     }
     let raw = std::fs::read_to_string(&abs).ok()?;
-    let (content, _report) = scrubber.scrub_file(&f.primary_path, &raw);
+    let (content, report) = scrubber.scrub_file(&f.primary_path, &raw);
     let lang = f.language_hint();
 
     let label =
@@ -180,5 +190,30 @@ pub(super) fn try_collect_per_finding(
         content.trim_end()
     ));
 
-    Some((name, body))
+    Some((
+        name,
+        CollectedContent {
+            content: body,
+            report,
+        },
+    ))
+}
+
+pub(super) struct CollectedContent {
+    pub content: String,
+    pub report: ScrubReport,
+}
+
+impl std::ops::Deref for CollectedContent {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
+}
+
+impl std::fmt::Display for CollectedContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.content.fmt(f)
+    }
 }

@@ -415,6 +415,42 @@ fn json_output_includes_structured_manifest() {
 }
 
 #[test]
+fn strict_scrub_counts_files_from_path_redactions() {
+    let tmp = tempfile::tempdir().expect("mk tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");
+    std::fs::create_dir_all(tmp.path().join(".cargo-context")).expect("mkdir config");
+    std::fs::write(tmp.path().join("src/secret.rs"), "DB_PASSWORD=hunter2\n")
+        .expect("write secret");
+    std::fs::write(tmp.path().join("files.txt"), "src/secret.rs\n").expect("write file list");
+    std::fs::write(
+        tmp.path().join(".cargo-context/scrub.yaml"),
+        r#"
+version: 1
+paths:
+  redact_whole:
+    - "src/secret.rs"
+"#,
+    )
+    .expect("write scrub config");
+
+    let output = Command::new(bin())
+        .args(["--files-from", "files.txt", "--strict-scrub"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("spawn cargo-context");
+
+    assert_eq!(output.status.code(), Some(2), "strict scrub should exit 2");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("[REDACTED FILE: src/secret.rs]"));
+    assert!(!stdout.contains("hunter2"));
+    assert!(
+        stderr.contains("--strict-scrub"),
+        "missing strict scrub stderr: {stderr}"
+    );
+}
+
+#[test]
 fn diff_range_uses_requested_git_range() {
     let (tmp, _envelope) = scaffold(&["src/first.rs"], ENVELOPE);
     git(tmp.path(), &["init"]);
