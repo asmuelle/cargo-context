@@ -100,7 +100,7 @@ jobs:
       # this repo + this workflow + this commit:
       #   gh attestation verify <archive> --owner asmuelle
       - name: Generate build provenance attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.package.outputs.asset }}
 
