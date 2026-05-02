@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use cargo_context_core::{
-    Budget, BudgetStrategy, PackBuilder, Preset, Tokenizer,
+    PackBuilder, PackOptions, Preset, ProjectConfig,
     collect::{self, Diff},
+    config::{
+        parse_budget_strategy, parse_expand_mode, parse_format, parse_preset, parse_tokenizer,
+    },
     scrub::Scrubber,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -22,10 +25,16 @@ impl Default for CargoContextServer {
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct BuildContextPackArgs {
     #[serde(default)]
     pub preset: Option<String>,
+
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    #[serde(default)]
+    pub root: Option<String>,
 
     #[serde(default)]
     pub max_tokens: Option<usize>,
@@ -38,6 +47,21 @@ pub struct BuildContextPackArgs {
 
     #[serde(default)]
     pub budget_strategy: Option<String>,
+
+    #[serde(default)]
+    pub format: Option<String>,
+
+    #[serde(default)]
+    pub expand_macros: Option<String>,
+
+    #[serde(default)]
+    pub diff: Option<String>,
+
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -63,41 +87,13 @@ impl CargoContextServer {
         &self,
         Parameters(args): Parameters<BuildContextPackArgs>,
     ) -> Result<String, String> {
-        let preset = match args.preset.as_deref() {
-            Some("fix") => Preset::Fix,
-            Some("feature") => Preset::Feature,
-            _ => Preset::Custom,
-        };
-        let tokenizer = match args.tokenizer.as_deref() {
-            Some("llama2") => Tokenizer::Llama2,
-            Some("tiktoken-cl100k") => Tokenizer::TiktokenCl100k,
-            Some("tiktoken-o200k") => Tokenizer::TiktokenO200k,
-            Some("claude") => Tokenizer::Claude,
-            Some("chars-div4") => Tokenizer::CharsDiv4,
-            _ => Tokenizer::Llama3,
-        };
-        let strategy = match args.budget_strategy.as_deref() {
-            Some("proportional") => BudgetStrategy::Proportional,
-            Some("truncate") => BudgetStrategy::Truncate,
-            _ => BudgetStrategy::Priority,
-        };
-        let budget = Budget {
-            max_tokens: args.max_tokens.unwrap_or(8000),
-            reserve_tokens: args.reserve_tokens.unwrap_or(2000),
-            strategy,
-        };
-
-        let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        let pack = PackBuilder::new()
-            .preset(preset)
-            .budget(budget)
-            .tokenizer(tokenizer)
-            .scrub(true)
-            .project_root(root)
+        let options = options_from_build_args(args)?;
+        let format = options.format;
+        let pack = PackBuilder::from_options(options)
             .build()
             .map_err(|e| e.to_string())?;
 
-        Ok(pack.render_markdown())
+        pack.render(format).map_err(|e| e.to_string())
     }
 
     #[rmcp::tool(
@@ -139,6 +135,54 @@ impl CargoContextServer {
             None => Err("cargo-expand not available or expansion failed".into()),
         }
     }
+}
+
+fn options_from_build_args(args: BuildContextPackArgs) -> Result<PackOptions, String> {
+    let root = match args.root {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    let config = ProjectConfig::load_from_workspace(&root).map_err(|e| e.to_string())?;
+    let mut options = match config {
+        Some(config) => config
+            .resolve_pack_options(args.profile.as_deref())
+            .map_err(|e| e.to_string())?,
+        None if args.profile.is_some() => {
+            return Err("profile requires .cargo-context/config.yaml".into());
+        }
+        None => PackOptions::default(),
+    };
+
+    options.project_root = Some(root);
+    options.scrub = true;
+    if let Some(preset) = args.preset {
+        options.preset = parse_preset(&preset).map_err(|e| e.to_string())?;
+    }
+    if let Some(max_tokens) = args.max_tokens {
+        options.budget.max_tokens = max_tokens;
+    }
+    if let Some(reserve_tokens) = args.reserve_tokens {
+        options.budget.reserve_tokens = reserve_tokens;
+    }
+    if let Some(strategy) = args.budget_strategy {
+        options.budget.strategy = parse_budget_strategy(&strategy).map_err(|e| e.to_string())?;
+    }
+    if let Some(tokenizer) = args.tokenizer {
+        options.tokenizer = parse_tokenizer(&tokenizer, None).map_err(|e| e.to_string())?;
+    }
+    if let Some(format) = args.format {
+        options.format = parse_format(&format).map_err(|e| e.to_string())?;
+    }
+    if let Some(expand_macros) = args.expand_macros {
+        options.expand_mode = parse_expand_mode(&expand_macros).map_err(|e| e.to_string())?;
+    }
+    if let Some(diff) = args.diff {
+        options.diff_range = Some(diff);
+    }
+    options.include_paths.extend(args.include_paths);
+    options.exclude_paths.extend(args.exclude_paths);
+
+    Ok(options)
 }
 
 pub(crate) fn scrubbed_diff_json(
@@ -341,6 +385,48 @@ patterns:
         assert!(json.contains("\"budget\""));
         assert!(json.contains("\"scrub\""));
         assert!(!json.contains("secret-proj"));
+    }
+
+    #[test]
+    fn build_context_args_resolve_profile_and_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cargo_project(tmp.path(), "profile-proj", "pub fn ok() {}\n");
+        write_file(
+            tmp.path().join(".cargo-context/config.yaml"),
+            r#"
+profiles:
+  review:
+    preset: feature
+    max_tokens: 9000
+    reserve_tokens: 1000
+    tokenizer: llama3
+    format: markdown
+    include_path:
+      - src/lib.rs
+"#,
+        );
+
+        let options = options_from_build_args(BuildContextPackArgs {
+            profile: Some("review".into()),
+            root: Some(tmp.path().display().to_string()),
+            preset: Some("fix".into()),
+            max_tokens: Some(1234),
+            reserve_tokens: Some(0),
+            tokenizer: Some("chars-div4".into()),
+            format: Some("json".into()),
+            exclude_paths: vec!["target/**".into()],
+            ..BuildContextPackArgs::default()
+        })
+        .unwrap();
+
+        assert_eq!(options.preset, Preset::Fix);
+        assert_eq!(options.budget.max_tokens, 1234);
+        assert_eq!(options.budget.reserve_tokens, 0);
+        assert_eq!(options.tokenizer.label(), "chars-div-4");
+        assert_eq!(options.format, cargo_context_core::Format::Json);
+        assert_eq!(options.include_paths, vec!["src/lib.rs"]);
+        assert_eq!(options.exclude_paths, vec!["target/**"]);
+        assert_eq!(options.project_root.as_deref(), Some(tmp.path()));
     }
 
     fn write_cargo_project(root: &std::path::Path, name: &str, source: &str) {

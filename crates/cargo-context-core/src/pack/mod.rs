@@ -12,6 +12,7 @@ use crate::collect::{self, Diff};
 use crate::error::{Error, Result};
 use crate::expand::{self, ExpandMode};
 use crate::impact::Finding;
+use crate::options::PackOptions;
 use crate::scrub::{ScrubReport, Scrubber};
 use crate::tokenize::Tokenizer;
 
@@ -392,6 +393,27 @@ impl Default for PackBuilder {
 impl PackBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_options(options: PackOptions) -> Self {
+        Self::new().options(options)
+    }
+
+    pub fn options(mut self, options: PackOptions) -> Self {
+        self.preset = options.preset;
+        self.budget = options.budget;
+        self.tokenizer = options.tokenizer;
+        self.scrub = options.scrub;
+        self.expand_mode = options.expand_mode;
+        self.include_paths = options.include_paths;
+        self.exclude_paths = options.exclude_paths;
+        self.diff_range = options.diff_range;
+        self.project_root = options.project_root;
+        self.stdin_prompt = options.stdin_prompt;
+        self.files_from = options.files_from;
+        self.impact_findings = options.impact_findings;
+        self.impact_per_finding = options.impact_per_finding;
+        self
     }
 
     pub fn preset(mut self, p: Preset) -> Self {

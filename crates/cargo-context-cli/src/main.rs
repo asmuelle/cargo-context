@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use cargo_context_core::{
-    Budget, Finding, PackBuilder, Preset, Tokenizer, impact as impact_mod,
+    Finding, PackBuilder, PackOptions, Preset, ProjectConfig, Tokenizer, impact as impact_mod,
     scrub::{ScrubConfig, Scrubber},
 };
 use clap::Parser;
@@ -25,13 +25,10 @@ fn main() -> Result<()> {
         bail!("`cargo-context scrub` requires a subcommand flag (--check)");
     }
 
-    let preset = if args.fix {
-        Preset::Fix
-    } else if args.feature {
-        Preset::Feature
-    } else {
-        args.preset.into()
-    };
+    let root = args.root.clone().unwrap_or(std::env::current_dir()?);
+    let config = load_pack_config(&root, args.config.as_deref())?;
+    let mut options = resolve_pack_options(config.as_ref(), args.profile.as_deref())?;
+    options.project_root = Some(root);
 
     let scrub = if args.no_scrub {
         if !args.i_know_what_im_doing {
@@ -41,17 +38,37 @@ fn main() -> Result<()> {
     } else {
         true
     };
+    options.scrub = scrub;
 
-    let budget = Budget {
-        max_tokens: args.max_tokens,
-        reserve_tokens: args.reserve_tokens,
-        strategy: args.budget_strategy.into(),
-    };
-
-    let tokenizer: Tokenizer = match args.hf_llama3_vocab {
+    if args.fix {
+        options.preset = Preset::Fix;
+    } else if args.feature {
+        options.preset = Preset::Feature;
+    } else if let Some(preset) = args.preset {
+        options.preset = preset.into();
+    }
+    if let Some(max_tokens) = args.max_tokens {
+        options.budget.max_tokens = max_tokens;
+    }
+    if let Some(reserve_tokens) = args.reserve_tokens {
+        options.budget.reserve_tokens = reserve_tokens;
+    }
+    if let Some(strategy) = args.budget_strategy {
+        options.budget.strategy = strategy.into();
+    }
+    options.tokenizer = match args.hf_llama3_vocab {
         Some(path) => Tokenizer::HfLlama3 { vocab_path: path },
-        None => args.tokenizer.into(),
+        None => args
+            .tokenizer
+            .map(Into::into)
+            .unwrap_or_else(|| options.tokenizer.clone()),
     };
+    if let Some(format) = args.format {
+        options.format = format.into();
+    }
+    if let Some(expand_macros) = args.expand_macros {
+        options.expand_mode = expand_macros.into();
+    }
 
     if let Some(c) = args.min_confidence
         && !(0.0..=1.0).contains(&c)
@@ -95,25 +112,13 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut builder = PackBuilder::new()
-        .preset(preset)
-        .budget(budget)
-        .tokenizer(tokenizer)
-        .scrub(scrub)
-        .expand_mode(args.expand_macros.into())
-        .project_root(std::env::current_dir()?)
-        .files_from(files_from_paths)
-        .impact_findings(impact_findings)
-        .impact_per_finding(args.per_finding);
-
-    for p in args.include_paths {
-        builder = builder.include_path(p);
-    }
-    for p in args.exclude_paths {
-        builder = builder.exclude_path(p);
-    }
+    options.files_from = files_from_paths;
+    options.impact_findings = impact_findings;
+    options.impact_per_finding = args.per_finding;
+    options.include_paths.extend(args.include_paths);
+    options.exclude_paths.extend(args.exclude_paths);
     if let Some(range) = args.diff {
-        builder = builder.diff_range(range);
+        options.diff_range = Some(range);
     }
 
     if !stdin_claimed {
@@ -123,18 +128,19 @@ fn main() -> Result<()> {
             stdin.lock().read_to_string(&mut buf)?;
             let trimmed = buf.trim();
             if !trimmed.is_empty() {
-                builder = builder.stdin_prompt(trimmed.to_string());
+                options.stdin_prompt = Some(trimmed.to_string());
             }
         }
     }
 
-    let pack = builder.build()?;
+    let format = options.format;
+    let pack = PackBuilder::from_options(options).build()?;
 
     if args.scrub_report {
         eprintln!("[scrub] {}", pack.scrub.summary());
     }
 
-    let rendered = pack.render(args.format.into())?;
+    let rendered = pack.render(format)?;
     print!("{rendered}");
 
     if args.strict_scrub && !pack.scrub.is_empty() {
@@ -145,6 +151,29 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+fn load_pack_config(
+    root: &std::path::Path,
+    config_path: Option<&std::path::Path>,
+) -> Result<Option<ProjectConfig>> {
+    match config_path {
+        Some(path) => ProjectConfig::load(path).map(Some).map_err(Into::into),
+        None => ProjectConfig::load_from_workspace(root).map_err(Into::into),
+    }
+}
+
+fn resolve_pack_options(
+    config: Option<&ProjectConfig>,
+    profile: Option<&str>,
+) -> Result<PackOptions> {
+    match config {
+        Some(config) => config.resolve_pack_options(profile).map_err(Into::into),
+        None if profile.is_some() => {
+            bail!("--profile requires .cargo-context/config.yaml or --config")
+        }
+        None => Ok(PackOptions::default()),
+    }
 }
 
 fn parse_files_list(raw: &str) -> Vec<PathBuf> {

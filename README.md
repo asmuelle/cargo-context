@@ -39,6 +39,7 @@ What's implemented and shipping today:
 | **MCP resources & prompts** — diff/errors/map/manifest resources and `fix_compiler_error` prompt | ✅ |
 | **`--impact-scope` JSON envelope** ([#5](https://github.com/asmuelle/cargo-context/issues/5)) — confidence-sorted Scoped Files, `--min-confidence`, `--per-finding`, `--exclude-ids`, kind-aware language hints | ✅ |
 | **Pack provenance** — Context Manifest with collectors, path filters, file attribution, budget decisions, and scrub summary; also exposed as `cargo-context://manifest` | ✅ |
+| **Project profiles** — `.cargo-context/config.yaml` defaults shared by CLI, MCP, and library adapters | ✅ |
 
 ## 1. Core Philosophy
 The tool operates on the principle of **Signal-to-Noise Optimization (SNO)**. An LLM does not need your entire `src/` directory; it needs:
@@ -120,6 +121,10 @@ cargo context --impact-scope impact.json --per-finding
 # Compare a specific Git range instead of the working tree against HEAD.
 cargo context --fix --diff HEAD~3..HEAD
 
+# Reuse project defaults from .cargo-context/config.yaml.
+cargo context --profile review
+cargo context --root ../other-rust-workspace --profile fix
+
 # Force in a focused API surface; exclude wins if both flags match.
 cargo context --feature --include-path 'crates/**/src/lib.rs'
 cargo context --feature --include-path 'crates/**/src/lib.rs' --exclude-path 'crates/legacy/**'
@@ -132,6 +137,9 @@ cargo context scrub --check
 
 | Flag | Default | Effect |
 | :--- | :--- | :--- |
+| `--root <PATH>` | current directory | Build the pack for an explicit workspace root. Useful for editor/MCP launchers. |
+| `--config <PATH>` | `.cargo-context/config.yaml` under root | Load pack profile defaults from an explicit config file. |
+| `--profile <NAME>` | config `default_profile` | Select a named profile from `.cargo-context/config.yaml`. |
 | `--preset <fix\|feature\|custom>` | `custom` | Selects which collectors run. `--fix` and `--feature` are shorthands. |
 | `--max-tokens <N>` | `8000` | Hard ceiling on assembled pack size. |
 | `--reserve-tokens <N>` | `2000` | Subtracted from `--max-tokens`; budget for the model's response. |
@@ -188,6 +196,38 @@ Allowlist: 2 entries (0 exact, 2 regex)
 ```
 
 Parse errors and invalid globs exit `1` with `✗ <path>:<line>:<col> — <message>` on stderr — suitable for a pre-commit hook.
+
+### 3.5 Project profiles: `.cargo-context/config.yaml`
+
+Pack defaults can live in `.cargo-context/config.yaml`. CLI flags override
+profile values, and MCP `build_context_pack` resolves the same profiles.
+
+```yaml
+default_profile: fix
+
+profiles:
+  fix:
+    preset: fix
+    max_tokens: 12000
+    reserve_tokens: 2000
+    tokenizer: tiktoken-o200k
+    budget_strategy: priority
+    expand_macros: off
+
+  review:
+    preset: feature
+    format: json
+    include_path:
+      - "crates/**/src/lib.rs"
+    exclude_path:
+      - "target/**"
+      - "crates/legacy/**"
+```
+
+Supported profile keys: `preset`, `max_tokens`, `reserve_tokens`,
+`budget_strategy`, `tokenizer`, `hf_llama3_vocab`, `format`,
+`expand_macros`, `diff`, `include_path`/`include_paths`, and
+`exclude_path`/`exclude_paths`.
 
 ---
 
@@ -433,7 +473,7 @@ cargo-context-mcp
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
-| `build_context_pack` | `{ preset?, max_tokens?, reserve_tokens?, tokenizer?, budget_strategy? }` | Rendered markdown pack (string) |
+| `build_context_pack` | `{ profile?, root?, preset?, max_tokens?, reserve_tokens?, tokenizer?, budget_strategy?, format?, expand_macros?, diff?, include_paths?, exclude_paths? }` | Rendered pack string |
 | `get_last_error` | `{}` | Structured `Diagnostics` JSON (level, code, message, primary spans) |
 | `get_diff` | `{ range?: "HEAD~3..HEAD" }` | Structured `Diff` JSON (FileDiff[] with hunks) |
 | `expand_macros` | `{ file: string, crate_name: string }` | Expanded source via `cargo-expand` |

@@ -13,8 +13,17 @@ pub struct Args {
     #[command(subcommand)]
     pub cmd: Option<Command>,
 
-    #[arg(long, value_enum, default_value_t = PresetArg::Custom)]
-    pub preset: PresetArg,
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    #[arg(long, value_enum)]
+    pub preset: Option<PresetArg>,
 
     #[arg(long, conflicts_with = "preset")]
     pub fix: bool,
@@ -22,26 +31,26 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["preset", "fix"])]
     pub feature: bool,
 
-    #[arg(long, default_value_t = 8000)]
-    pub max_tokens: usize,
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
 
-    #[arg(long, default_value_t = 2000)]
-    pub reserve_tokens: usize,
+    #[arg(long)]
+    pub reserve_tokens: Option<usize>,
 
-    #[arg(long, value_enum, default_value_t = BudgetStrategyArg::Priority)]
-    pub budget_strategy: BudgetStrategyArg,
+    #[arg(long, value_enum)]
+    pub budget_strategy: Option<BudgetStrategyArg>,
 
-    #[arg(long, value_enum, default_value_t = TokenizerArg::Llama3)]
-    pub tokenizer: TokenizerArg,
+    #[arg(long, value_enum)]
+    pub tokenizer: Option<TokenizerArg>,
 
     #[arg(long, value_name = "PATH")]
     pub hf_llama3_vocab: Option<PathBuf>,
 
-    #[arg(short, long, value_enum, default_value_t = FormatArg::Markdown)]
-    pub format: FormatArg,
+    #[arg(short, long, value_enum)]
+    pub format: Option<FormatArg>,
 
-    #[arg(long, value_enum, default_value_t = ExpandModeArg::Off)]
-    pub expand_macros: ExpandModeArg,
+    #[arg(long, value_enum)]
+    pub expand_macros: Option<ExpandModeArg>,
 
     #[arg(long, value_name = "RANGE")]
     pub diff: Option<String>,

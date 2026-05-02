@@ -9,16 +9,20 @@
 
 pub mod budget;
 pub mod collect;
+pub mod config;
 pub mod error;
 pub mod expand;
 pub mod impact;
+pub mod options;
 pub mod pack;
 pub mod scrub;
 pub mod tokenize;
 
 pub use budget::{Budget, BudgetStrategy};
+pub use config::{PackProfile, ProjectConfig};
 pub use error::{Error, Result};
 pub use expand::ExpandMode;
 pub use impact::{Finding, filter_and_sort as filter_findings, parse_envelope, unique_paths};
+pub use options::PackOptions;
 pub use pack::{Format, Pack, PackBuilder, Preset, Section};
 pub use tokenize::Tokenizer;

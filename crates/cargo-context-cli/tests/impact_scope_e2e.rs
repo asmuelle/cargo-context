@@ -415,6 +415,129 @@ fn json_output_includes_structured_manifest() {
 }
 
 #[test]
+fn config_default_profile_drives_pack_options() {
+    let (tmp, _envelope) = scaffold(&["src/hot.rs", "src/warm.rs"], ENVELOPE);
+    std::fs::create_dir_all(tmp.path().join(".cargo-context")).expect("mkdir config");
+    std::fs::write(
+        tmp.path().join(".cargo-context/config.yaml"),
+        r#"
+default_profile: review
+profiles:
+  review:
+    preset: feature
+    max_tokens: 4096
+    reserve_tokens: 512
+    tokenizer: chars-div-4
+    format: json
+    expand_macros: off
+    include_path:
+      - src/hot.rs
+    exclude_path:
+      - src/warm.rs
+"#,
+    )
+    .expect("write config");
+
+    let out = run(tmp.path(), &[]);
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json output");
+
+    assert_eq!(json["manifest"]["preset"], "feature");
+    assert_eq!(json["tokenizer"], "chars-div-4");
+    assert_eq!(json["manifest"]["budget"]["max_tokens"], 4096);
+    assert_eq!(json["manifest"]["budget"]["reserve_tokens"], 512);
+    assert_eq!(json["manifest"]["path_filters"]["include"][0], "src/hot.rs");
+    assert_eq!(
+        json["manifest"]["path_filters"]["exclude"][0],
+        "src/warm.rs"
+    );
+    assert!(
+        json["manifest"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "src/hot.rs" && f["status"] == "included"),
+        "profile include path should be force included: {json:#}"
+    );
+}
+
+#[test]
+fn cli_flags_override_config_profile() {
+    let (tmp, _envelope) = scaffold(&["src/hot.rs"], ENVELOPE);
+    std::fs::create_dir_all(tmp.path().join(".cargo-context")).expect("mkdir config");
+    std::fs::write(
+        tmp.path().join(".cargo-context/config.yaml"),
+        r#"
+profiles:
+  review:
+    preset: feature
+    max_tokens: 9000
+    reserve_tokens: 1000
+    tokenizer: llama3
+    format: markdown
+"#,
+    )
+    .expect("write config");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "--profile",
+            "review",
+            "--preset",
+            "fix",
+            "--max-tokens",
+            "1234",
+            "--reserve-tokens",
+            "0",
+            "--tokenizer",
+            "chars-div4",
+            "--format",
+            "json",
+        ],
+    );
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json output");
+
+    assert_eq!(json["manifest"]["preset"], "fix");
+    assert_eq!(json["tokenizer"], "chars-div-4");
+    assert_eq!(json["manifest"]["budget"]["max_tokens"], 1234);
+    assert_eq!(json["manifest"]["budget"]["reserve_tokens"], 0);
+}
+
+#[test]
+fn root_flag_loads_profile_from_target_workspace() {
+    let parent = tempfile::tempdir().expect("mk parent");
+    let project = parent.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("mkdir src");
+    std::fs::write(project.join("src/lib.rs"), "pub fn project() {}\n").expect("write lib");
+    std::fs::create_dir_all(project.join(".cargo-context")).expect("mkdir config");
+    std::fs::write(
+        project.join(".cargo-context/config.yaml"),
+        r#"
+profiles:
+  json:
+    format: json
+    include_path:
+      - src/lib.rs
+"#,
+    )
+    .expect("write config");
+
+    let root = project.display().to_string();
+    let out = run(parent.path(), &["--root", &root, "--profile", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json output");
+
+    assert_eq!(json["project"], "project");
+    assert!(
+        json["manifest"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "src/lib.rs" && f["status"] == "included"),
+        "--root should resolve config/profile against the target workspace: {json:#}"
+    );
+}
+
+#[test]
 fn strict_scrub_counts_files_from_path_redactions() {
     let tmp = tempfile::tempdir().expect("mk tempdir");
     std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");

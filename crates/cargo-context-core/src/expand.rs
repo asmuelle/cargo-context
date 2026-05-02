@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ExpandMode {
     Off,
     #[default]
