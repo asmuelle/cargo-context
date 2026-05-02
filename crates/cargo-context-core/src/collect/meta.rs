@@ -77,12 +77,12 @@ pub fn cargo_metadata(root: &Path) -> Result<WorkspaceMap> {
         .exec()
         .map_err(|e| Error::Tool(format!("cargo metadata failed: {e}")))?;
 
-    let root_package = meta.root_package().map(|p| p.name.clone());
+    let root_package = meta.root_package().map(|p| p.name.to_string());
     let members: Vec<WorkspaceMember> = meta
         .workspace_packages()
         .into_iter()
         .map(|p| WorkspaceMember {
-            name: p.name.clone(),
+            name: p.name.to_string(),
             version: p.version.to_string(),
             manifest_path: p.manifest_path.clone().into_std_path_buf(),
             dependencies: p

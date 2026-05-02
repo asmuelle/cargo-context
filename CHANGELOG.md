@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-05-02
+
+### Changed
+
+- Bumped release dependency baselines for `cargo_metadata`, `tokenizers`,
+  `tiktoken-rs`, and GitHub provenance attestations.
+- Aligned published crate metadata with the canonical
+  `github.com/asmuelle/cargo-context` repository.
+
+### Fixed
+
+- Preserved the `0.3.0` scrub/provenance hardening under the updated
+  dependency stack.
+
 ## [0.3.0] - 2026-04-26
 
 ### Added
