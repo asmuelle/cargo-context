@@ -123,7 +123,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          count="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')"
+          count="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
           if [ "$count" -lt 5 ]; then
             echo "expected at least 5 release assets for $GITHUB_REF_NAME, found $count" >&2
             exit 1
