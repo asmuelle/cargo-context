@@ -34,7 +34,7 @@ prettyplease = "0.2"
 tiktoken-rs = "0.11"
 globset = "0.4"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-rmcp = { version = "1.5", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+rmcp = { version = "1.6", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
 schemars = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
